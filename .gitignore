@@ -1,0 +1,33 @@
+# ============================
+# RDUSA Bot Git Ignore
+# ============================
+
+# Environment files (contains your bot token)
+.env
+
+# Node modules
+node_modules/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# VS Code settings (optional, but useful to keep local settings private)
+.vscode/
+
+# Build or cache folders (if ever added)
+dist/
+cache/

@@ -1,0 +1,14 @@
+{
+  "name": "rdusa-bot",
+  "version": "1.0.0",
+  "description": "A simple Discord bot for RDUSA",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.5"
+  }
+}

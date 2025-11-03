@@ -5,6 +5,10 @@
 # Environment files (contains your bot token)
 .env
 
+# Hide Bot Owner commands
+commands/Bot Owner/
+db.js
+
 # Node modules
 node_modules/
 

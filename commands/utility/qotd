@@ -1,0 +1,192 @@
+import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// ───────────────────────────────
+// 📌 FILE PATH SETUP (Fix for ESM)
+// ───────────────────────────────
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// ───────────────────────────────
+// ⚙️ CONFIGURATION
+// ───────────────────────────────
+const QOTD_CHANNEL_ID = "1389009644063690975"; // QOTD Channel
+const PING_ROLE_ID = "1375628530548998154"; // Role to ping
+const THREAD_ROLE_ID = "1347706993204264991"; // Role allowed to talk in thread
+const LOG_CHANNEL_ID = "1388955430318768179"; // Log channel
+
+// Roles allowed to use /qotd
+const ALLOWED_ROLES = [
+  "1332197345403605123",
+  "1369877362224664647",
+  "1369065942243344464",
+  "1370531377468149881",
+  "1386575843488170075",
+  "1370529017307988120",
+  "1369066592423645244",
+];
+
+// ───────────────────────────────
+// 🕒 COOLDOWN FILE
+// ───────────────────────────────
+const dataDir = path.join(__dirname, "../../data");
+const cooldownFile = path.join(dataDir, "qotdCooldown.json");
+
+if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+if (!fs.existsSync(cooldownFile)) {
+  fs.writeFileSync(cooldownFile, JSON.stringify({ lastUsed: 0 }, null, 2));
+}
+
+// ───────────────────────────────
+// 🧩 SLASH COMMAND
+// ───────────────────────────────
+export default {
+  data: new SlashCommandBuilder()
+    .setName("qotd")
+    .setDescription("Post a Question of the Day to the QOTD channel.")
+    .addStringOption((option) =>
+      option
+        .setName("question")
+        .setDescription("The question you'd like to ask.")
+        .setRequired(true)
+    ),
+
+  async execute(interaction) {
+    try {
+      // ✅ Fix 1 — silence typings issue for ephemeral flag
+      await interaction.deferReply({ ephemeral: true } /** @type {any} */);
+
+      // 🔒 Permission Check
+      const member = await interaction.guild.members.fetch(interaction.user.id);
+      const allowed = member.roles.cache.some((r) =>
+        ALLOWED_ROLES.includes(r.id)
+      );
+
+      if (!allowed) {
+        return interaction.editReply(
+          "🚫 You do not have permission to use this command."
+        );
+      }
+
+      // ⏰ Cooldown Check (24 hours)
+      const cooldownData = JSON.parse(fs.readFileSync(cooldownFile, "utf8"));
+      const now = Date.now();
+      const diff = now - cooldownData.lastUsed;
+      const remaining = 24 - diff / (1000 * 60 * 60);
+
+      if (diff < 24 * 60 * 60 * 1000) {
+        return interaction.editReply(
+          `🕓 This command can only be used once every 24 hours.\nPlease wait **${remaining.toFixed(
+            1
+          )}** more hour(s).`
+        );
+      }
+
+      cooldownData.lastUsed = now;
+      fs.writeFileSync(cooldownFile, JSON.stringify(cooldownData, null, 2));
+
+      // 📨 Send QOTD Embed
+      const question = interaction.options.getString("question");
+      const qotdChannel = await interaction.client.channels
+        .fetch(QOTD_CHANNEL_ID)
+        .catch(() => null);
+
+      if (!qotdChannel)
+        return interaction.editReply("❌ Could not find the QOTD channel.");
+
+      const embed = new EmbedBuilder()
+        .setColor(0x2596be)
+        .setTitle("**Question of the Day!**")
+        .setDescription(question)
+        .setFooter({ text: `Sent by ${interaction.user.tag}` })
+        .setTimestamp();
+
+      const qotdMessage = await qotdChannel.send({
+        content: `<@&${PING_ROLE_ID}>`,
+        embeds: [embed],
+      });
+
+      // 🧵 Create Discussion Thread
+      const thread = await qotdMessage.startThread({
+        name: `QOTD Discussion - ${interaction.user.username}`,
+        autoArchiveDuration: 1440,
+        reason: "QOTD Discussion Thread",
+      });
+
+      // Wait briefly to ensure thread permissions initialize
+      await new Promise((r) => setTimeout(r, 1500));
+
+      try {
+        const everyone = interaction.guild.roles.everyone;
+        const discussionRole = interaction.guild.roles.cache.get(THREAD_ROLE_ID);
+
+        // Restrict @everyone
+        if (everyone)
+          await thread.permissionOverwrites.edit(everyone, {
+            SendMessages: false,
+          });
+
+        // Allow discussion role
+        if (discussionRole)
+          await thread.permissionOverwrites.edit(discussionRole, {
+            SendMessages: true,
+            ViewChannel: true,
+          });
+      } catch (permErr) {
+        console.warn("⚠️ Failed to set thread permissions:", permErr.message);
+      }
+
+      // 🗣️ Thread welcome message
+      await thread.send(
+        `💬 Welcome to today's QOTD discussion!\nOnly members with <@&${THREAD_ROLE_ID}> can participate.`
+      );
+
+      // ✅ Confirmation
+      await interaction.editReply(
+        `✅ QOTD posted successfully in <#${QOTD_CHANNEL_ID}>.\nA discussion thread has been created.`
+      );
+
+      // 🧾 Log Embed
+      const logChannel = await interaction.client.channels
+        .fetch(LOG_CHANNEL_ID)
+        .catch(() => null);
+
+      if (logChannel) {
+        const logEmbed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle("📝 QOTD Posted")
+          .addFields(
+            {
+              name: "Author",
+              value: `${interaction.user.tag} (<@${interaction.user.id}>)`,
+              inline: false,
+            },
+            { name: "Question", value: question, inline: false },
+            { name: "Channel", value: `<#${QOTD_CHANNEL_ID}>`, inline: true },
+            {
+              name: "Message Link",
+              value: `[View QOTD](https://discord.com/channels/${interaction.guild.id}/${qotdChannel.id}/${qotdMessage.id})`,
+              inline: false,
+            }
+          )
+          // ✅ Fix 2 — add iconURL: null for type safety
+          .setFooter({ text: `User ID: ${interaction.user.id}`, iconURL: null })
+          .setTimestamp();
+
+        await logChannel.send({ embeds: [logEmbed] });
+      }
+    } catch (err) {
+      console.error("❌ Error executing /qotd:", err);
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: "❌ There was an error while executing this command.",
+          ephemeral: true,
+        });
+      } else {
+        await interaction.editReply("❌ An error occurred while running this command.");
+      }
+    }
+  },
+};

@@ -1,4 +1,13 @@
-import { Client, GatewayIntentBits, Collection, EmbedBuilder } from "discord.js";
+import {
+  Client,
+  GatewayIntentBits,
+  Collection,
+  EmbedBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  ActionRowBuilder,
+} from "discord.js";
 import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
@@ -6,9 +15,19 @@ import fetch from "node-fetch";
 import mysql from "mysql2/promise";
 import { fileURLToPath } from "url";
 import { checkExpiredBlacklists } from "./utils/trelloExpiryManager.js";
-import { logIncident } from "./utils/raidLogger.js";
+import { updateChainOfCommand } from "./utils/updateCoC.js";
 
 dotenv.config();
+
+// ───────────────────────────────
+// ⚙️ Error Guards (Prevents Crashes)
+// ───────────────────────────────
+process.on("unhandledRejection", (error) => {
+  console.warn("⚠️ Unhandled rejection:", error);
+});
+process.on("uncaughtException", (error) => {
+  console.warn("⚠️ Uncaught exception:", error);
+});
 
 // ───────────────────────────────
 // 🧠 Client Setup
@@ -74,21 +93,14 @@ await loadCommands(path.join(__dirname, "commands"));
 // ───────────────────────────────
 async function loadEvents() {
   const eventsPath = path.join(__dirname, "events");
+  if (!fs.existsSync(eventsPath)) return;
   const eventFiles = fs.readdirSync(eventsPath).filter(f => f.endsWith(".js"));
-
   for (const file of eventFiles) {
     const { default: event } = await import(`file://${path.join(eventsPath, file)}`);
-    if (!event || !event.name) {
-      console.warn(`⚠️ Skipping invalid event file: ${file}`);
-      continue;
-    }
-
-    if (event.once)
-      client.once(event.name, (...args) => event.execute(...args, client));
-    else
-      client.on(event.name, (...args) => event.execute(...args, client));
-
-    console.log(`🟢 Loaded event: ${event.name}`);
+    if (!event || !event.name) continue;
+    event.once
+      ? client.once(event.name, (...args) => event.execute(...args, client))
+      : client.on(event.name, (...args) => event.execute(...args, client));
   }
 }
 await loadEvents();
@@ -104,7 +116,10 @@ client.once("clientReady", async () => {
     status: "online",
   });
 
-  const devLogChannel = await client.channels.fetch(process.env.DEV_LOG_CHANNEL_ID).catch(() => null);
+  const devLogChannel = await client.channels
+    .fetch(process.env.DEV_LOG_CHANNEL_ID)
+    .catch(() => null);
+
   if (devLogChannel) {
     const startupEmbed = new EmbedBuilder()
       .setColor(0x57f287)
@@ -122,32 +137,166 @@ client.once("clientReady", async () => {
   console.log("🕓 Starting Trello blacklist expiry checker...");
   setInterval(() => checkExpiredBlacklists(client), 1000 * 60 * 60);
   await checkExpiredBlacklists(client);
+
+  // 🪖 Daily Chain of Command Updater
+  console.log("🕓 Scheduling daily Chain of Command updates...");
+  setInterval(() => updateChainOfCommand(client), 1000 * 60 * 60 * 24);
+  await updateChainOfCommand(client);
 });
 
 // ───────────────────────────────
-// 🚫 Global Blacklist Check (Trello-based)
+// 🎛 Global Interaction Handler
 // ───────────────────────────────
 client.on("interactionCreate", async (interaction) => {
+  const { TRELLO_API_KEY, TRELLO_TOKEN } = process.env;
+
+  // ✅ Bug Report Modal
+  if (interaction.isModalSubmit() && interaction.customId === "reportbug_modal") {
+    const { handleBugModal } = await import("./commands/utility/reportbug.js");
+    return handleBugModal(interaction);
+  }
+
+  // ✅ Commission Buttons/Modals
+  const APPROVED_ROLES = [
+    "1332198216560541696",
+    "1378460548844486776",
+    "1389056453486051439",
+    "1332198329899286633",
+    "1332198334135275620",
+    "1332198337977389088",
+    "1332198340288577589",
+    "1332200411586887760",
+    "1332198672720723988",
+    "1347449287046336563",
+    "1347451565623218206",
+    "1347451569372926022",
+    "1347717557674573865",
+    "1347721442392805396",
+    "1347452419230928897",
+    "1347452417595277404",
+  ];
+
+  if (interaction.isButton()) {
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    const isAuthorized = member?.roles.cache.some(r => APPROVED_ROLES.includes(r.id));
+    if (!isAuthorized) {
+      try {
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({
+            content: "🚫 You are not authorized to manage this request.",
+            flags: 64,
+          });
+        } else {
+          await interaction.followUp({
+            content: "🚫 You are not authorized to manage this request.",
+            flags: 64,
+          });
+        }
+      } catch (err) {
+        console.warn("⚠️ Safe interaction catch:", err.message);
+      }
+      return;
+    }
+
+    const message = interaction.message;
+    const embed = message.embeds[0];
+
+    // ✅ Approve Button
+    if (interaction.customId === "commission_accept") {
+      await interaction.deferUpdate().catch(() => null);
+      const approvedEmbed = EmbedBuilder.from(embed)
+        .setColor(0x57f287)
+        .spliceFields(2, 1, { name: "Status", value: `✅ Approved by ${interaction.user.tag}` });
+      await message.edit({ embeds: [approvedEmbed], components: [] });
+
+      const cardId = embed?.footer?.text?.match(/CardID:(\w+)/)?.[1];
+      if (cardId) {
+        const trelloComment = `✅ Commission Approved\nBy: ${interaction.user.tag}\nDate: ${new Date().toUTCString()}`;
+        await fetch(
+          `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: trelloComment }),
+          }
+        );
+      }
+
+      return interaction.followUp({
+        content: `✅ Request approved by ${interaction.user.tag}.`,
+        flags: 64,
+      });
+    }
+
+    // ❌ Deny Button
+    if (interaction.customId === "commission_deny") {
+      const modal = new ModalBuilder()
+        .setCustomId("commission_deny_modal")
+        .setTitle("Deny Commission Request");
+      const reasonInput = new TextInputBuilder()
+        .setCustomId("deny_reason")
+        .setLabel("Reason for Denial")
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true);
+      modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
+      return interaction.showModal(modal).catch(() => null);
+    }
+  }
+
+  // ❌ Deny Modal Submission
+  if (interaction.isModalSubmit() && interaction.customId === "commission_deny_modal") {
+    await interaction.deferReply({ flags: 64 }).catch(() => null);
+    const denyReason = interaction.fields.getTextInputValue("deny_reason");
+    const message = interaction.message?.reference
+      ? await interaction.channel.messages.fetch(interaction.message.reference.messageId).catch(() => null)
+      : interaction.message;
+    const embed = message?.embeds?.[0];
+    if (!embed) return;
+
+    const deniedEmbed = EmbedBuilder.from(embed)
+      .setColor(0xed4245)
+      .spliceFields(2, 1, {
+        name: "Status",
+        value: `❌ Denied by ${interaction.user.tag}\n**Reason:** ${denyReason}`,
+      });
+    await message.edit({ embeds: [deniedEmbed], components: [] }).catch(() => null);
+
+    const cardId = embed?.footer?.text?.match(/CardID:(\w+)/)?.[1];
+    if (cardId) {
+      const trelloComment = `❌ Commission Denied\nBy: ${interaction.user.tag}\nReason: ${denyReason}\nDate: ${new Date().toUTCString()}`;
+      await fetch(
+        `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: trelloComment }),
+        }
+      );
+    }
+
+    await interaction.editReply({
+      content: `❌ Request denied by ${interaction.user.tag}.`,
+    }).catch(() => null);
+  }
+
+  // ─── Slash Commands ───
   if (!interaction.isChatInputCommand()) return;
 
+  // 🚫 Global Blacklist Check
   try {
-    const { TRELLO_API_KEY, TRELLO_TOKEN } = process.env;
     const BOARD_ID = "iD9Bu3c1";
     const LIST_NAME = "Blacklisted Users";
-
     const listsRes = await fetch(
       `https://api.trello.com/1/boards/${BOARD_ID}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
     );
     const lists = await listsRes.json();
-    const blacklistList = lists.find((l) => l.name.toLowerCase() === LIST_NAME.toLowerCase());
+    const blacklistList = lists.find(l => l.name.toLowerCase() === LIST_NAME.toLowerCase());
     if (!blacklistList) return;
-
     const cardsRes = await fetch(
       `https://api.trello.com/1/lists/${blacklistList.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
     );
     const cards = await cardsRes.json();
-
-    const isBlacklisted = cards.some((c) => c.name.includes(interaction.user.id));
+    const isBlacklisted = cards.some(c => c.name.includes(interaction.user.id));
     if (isBlacklisted) {
       return interaction.reply({
         content: "🚫 You are blacklisted from using this bot.",
@@ -158,123 +307,23 @@ client.on("interactionCreate", async (interaction) => {
     console.error("⚠️ Blacklist check failed:", err);
   }
 
+  // ─── Command Execution ───
   const command = client.commands.get(interaction.commandName);
   if (!command) return;
 
   try {
     const startTime = Date.now();
-    await command.execute(interaction);
+    await command.execute(interaction, client);
     const latency = Date.now() - startTime;
-
-    console.log(`✅ ${interaction.user.tag} used /${interaction.commandName}`);
-
-    const optionsUsed =
-      interaction.options.data.length > 0
-        ? interaction.options.data.map((opt) => `• **${opt.name}:** ${opt.value ?? "N/A"}`).join("\n")
-        : "None";
-
-    const logEmbed = new EmbedBuilder()
-      .setColor(0x57f287)
-      .setTitle("✅ Command Executed Successfully")
-      .addFields(
-        { name: "Command", value: `/${interaction.commandName}` },
-        { name: "User", value: `${interaction.user.tag} (<@${interaction.user.id}>)` },
-        { name: "Options", value: optionsUsed },
-        { name: "Guild", value: `${interaction.guild?.name || "Direct Message"} (${interaction.guild?.id || "N/A"})` },
-        { name: "Execution Time", value: `${latency} ms`, inline: true },
-        { name: "Timestamp", value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
-      )
-      .setThumbnail(interaction.user.displayAvatarURL())
-      .setFooter({ text: "RDUSA Bot Logging System" })
-      .setTimestamp();
-
-    const mainLog = await client.channels.fetch(process.env.LOG_CHANNEL_ID_MAIN).catch(() => null);
-    if (mainLog) await mainLog.send({ embeds: [logEmbed] });
-
-    const devLog = await client.channels.fetch(process.env.LOG_CHANNEL_ID_DEV).catch(() => null);
-    if (devLog) await devLog.send({ embeds: [logEmbed] });
+    console.log(`✅ ${interaction.user.tag} used /${interaction.commandName} (${latency}ms)`);
   } catch (error) {
     console.error(`❌ Error executing /${interaction.commandName}:`, error);
-
     if (!interaction.replied && !interaction.deferred) {
       await interaction.reply({
         content: "❌ There was an error executing that command.",
         flags: 64,
       });
     }
-
-    const errorEmbed = new EmbedBuilder()
-      .setColor(0xed4245)
-      .setTitle("❌ Command Execution Failed")
-      .addFields(
-        { name: "Command", value: `/${interaction.commandName}` },
-        { name: "User", value: `${interaction.user.tag} (<@${interaction.user.id}>)` },
-        { name: "Error Message", value: `\`\`\`${error.message || error}\`\`\`` },
-        { name: "Timestamp", value: `<t:${Math.floor(Date.now() / 1000)}:F>` }
-      )
-      .setThumbnail(interaction.user.displayAvatarURL())
-      .setFooter({ text: "RDUSA Bot Logging System" })
-      .setTimestamp();
-
-    const devErrorChannel = await client.channels.fetch(process.env.DEV_LOG_CHANNEL_ID).catch(() => null);
-    if (devErrorChannel) {
-      await devErrorChannel.send({
-        content: `<@238058962711216130> 🚨 Command error detected`,
-        embeds: [errorEmbed],
-      });
-    }
-  }
-});
-
-// ───────────────────────────────
-// ⚠️ Global Error Handlers
-// ───────────────────────────────
-process.on("unhandledRejection", async (error) => {
-  if (error?.code === 10062 || (error?.rawError && error.rawError.code === 10062)) {
-    console.warn("⚠️ Ignored expired Discord interaction (code 10062).");
-    return;
-  }
-
-  console.error("❌ Unhandled Promise Rejection:", error);
-  const channel = await client.channels.fetch(process.env.DEV_LOG_CHANNEL_ID).catch(() => null);
-  if (channel) {
-    const embed = new EmbedBuilder()
-      .setColor(0xed4245)
-      .setTitle("🔴 Unhandled Promise Rejection")
-      .setDescription(`\`\`\`${error.message || error}\`\`\``)
-      .setTimestamp();
-    await channel.send({ embeds: [embed] });
-  }
-});
-
-process.on("uncaughtException", async (error) => {
-  if (error?.code === 10062 || (error?.rawError && error.rawError.code === 10062)) {
-    console.warn("⚠️ Ignored uncaught expired interaction (code 10062).");
-    return;
-  }
-
-  console.error("💥 Uncaught Exception:", error);
-  const channel = await client.channels.fetch(process.env.DEV_LOG_CHANNEL_ID).catch(() => null);
-  if (channel) {
-    const embed = new EmbedBuilder()
-      .setColor(0xed4245)
-      .setTitle("💥 Uncaught Exception")
-      .setDescription(`\`\`\`${error.message || error}\`\`\``)
-      .setTimestamp();
-    await channel.send({ embeds: [embed] });
-  }
-});
-
-process.on("warning", async (warning) => {
-  console.warn("⚠️ Warning:", warning);
-  const channel = await client.channels.fetch(process.env.DEV_LOG_CHANNEL_ID).catch(() => null);
-  if (channel) {
-    const embed = new EmbedBuilder()
-      .setColor(0xfee75c)
-      .setTitle("🟡 Node.js Warning")
-      .setDescription(`\`\`\`${warning.message}\`\`\``)
-      .setTimestamp();
-    await channel.send({ embeds: [embed] });
   }
 });
 

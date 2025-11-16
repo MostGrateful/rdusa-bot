@@ -1,162 +1,162 @@
 import {
   SlashCommandBuilder,
-  EmbedBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
-  MessageFlags,
+  EmbedBuilder,
 } from "discord.js";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
+dotenv.config();
+
+const { TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BUGS_BOARD_ID } = process.env;
 
 export default {
   data: new SlashCommandBuilder()
     .setName("reportbug")
-    .setDescription("Submit a bot bug report directly to the development team."),
+    .setDescription("Open a form to report a bug to the RDUSA development team."),
 
   async execute(interaction) {
-    const bugChannelId = "1389116998344249404"; // ✅ Dev server bug reports channel
-    const devLogId = process.env.DEV_LOG_CHANNEL_ID;
-
-    // 🧾 Create modal form
+    // 🧾 Step 1: Create and show the modal
     const modal = new ModalBuilder()
       .setCustomId("reportbug_modal")
-      .setTitle("🐛 Report a Bot Bug");
+      .setTitle("🐞 Report a Bug");
 
-    const robloxUserInput = new TextInputBuilder()
-      .setCustomId("roblox_username")
-      .setLabel("Roblox Username")
+    const titleInput = new TextInputBuilder()
+      .setCustomId("bug_title")
+      .setLabel("Bug Title")
       .setStyle(TextInputStyle.Short)
-      .setPlaceholder("Example: james_ashworth")
+      .setPlaceholder("Example: /checkrecord command not responding")
       .setRequired(true);
 
-    const robloxIdInput = new TextInputBuilder()
-      .setCustomId("roblox_id")
-      .setLabel("Roblox User ID")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("Example: 1234567890")
-      .setRequired(true);
-
-    const bugDescInput = new TextInputBuilder()
-      .setCustomId("bug_description")
-      .setLabel("Describe the Bug")
+    const descInput = new TextInputBuilder()
+      .setCustomId("bug_desc")
+      .setLabel("Bug Description")
       .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("Explain what happened, when it occurred, etc.")
+      .setPlaceholder("Describe what happened, steps to reproduce, etc.")
       .setRequired(true);
 
-    const recreateInput = new TextInputBuilder()
-      .setCustomId("can_recreate")
-      .setLabel("Can this bug be recreated? (Yes/No)")
+    const severityInput = new TextInputBuilder()
+      .setCustomId("bug_severity")
+      .setLabel("Severity (Low, Medium, High, Critical)")
       .setStyle(TextInputStyle.Short)
-      .setPlaceholder("Yes or No")
+      .setPlaceholder("Enter one: Low, Medium, High, Critical")
       .setRequired(true);
 
     const screenshotInput = new TextInputBuilder()
-      .setCustomId("bug_screenshot")
-      .setLabel("Screenshot URL(s) (Optional)")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("https://example.com/image.png, https://example.com/image2.png")
-      .setRequired(false);
+      .setCustomId("bug_screenshots")
+      .setLabel("Screenshots (Links only)")
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder("Paste screenshot links (comma or space separated)")
+      .setRequired(false); // optional, in case they don’t have any
 
     modal.addComponents(
-      new ActionRowBuilder().addComponents(robloxUserInput),
-      new ActionRowBuilder().addComponents(robloxIdInput),
-      new ActionRowBuilder().addComponents(bugDescInput),
-      new ActionRowBuilder().addComponents(recreateInput),
+      new ActionRowBuilder().addComponents(titleInput),
+      new ActionRowBuilder().addComponents(descInput),
+      new ActionRowBuilder().addComponents(severityInput),
       new ActionRowBuilder().addComponents(screenshotInput)
     );
 
     await interaction.showModal(modal);
-
-    // ⏳ Wait for submission
-    const submission = await interaction
-      .awaitModalSubmit({
-        filter: (i) => i.customId === "reportbug_modal" && i.user.id === interaction.user.id,
-        time: 120000, // 2 minutes
-      })
-      .catch(() => null);
-
-    if (!submission) {
-      return interaction.followUp({
-        content: "❌ You took too long to submit the bug report. Please try again.",
-        flags: MessageFlags.Ephemeral,
-      });
-    }
-
-    // 📋 Extract values
-    const robloxUsername = submission.fields.getTextInputValue("roblox_username");
-    const robloxId = submission.fields.getTextInputValue("roblox_id");
-    const bugDescription = submission.fields.getTextInputValue("bug_description");
-    const canRecreate = submission.fields.getTextInputValue("can_recreate");
-    const screenshots = submission.fields.getTextInputValue("bug_screenshot")?.trim() || null;
-
-    // 🟩 Create embed
-    const embed = new EmbedBuilder()
-      .setColor(0xed4245)
-      .setTitle("🐛 Bug Report Submitted")
-      .addFields(
-        { name: "👤 Roblox Username", value: robloxUsername, inline: true },
-        { name: "🆔 Roblox ID", value: robloxId, inline: true },
-        {
-          name: "🪧 Reported By",
-          value: `${submission.user.tag} (<@${submission.user.id}>)`,
-          inline: false,
-        },
-        {
-          name: "🏛️ Server",
-          value: `${interaction.guild?.name || "Direct Message"} (${interaction.guild?.id || "N/A"})`,
-          inline: false,
-        },
-        { name: "📝 Bug Description", value: bugDescription, inline: false },
-        { name: "🔁 Can Be Recreated?", value: canRecreate || "N/A", inline: true }
-      )
-      .setTimestamp()
-      .setFooter({
-        text: "Bug Report System • Thank you for helping improve the bot!",
-        iconURL: submission.user.displayAvatarURL(),
-      });
-
-    // 🔗 Add screenshots (if valid)
-    if (screenshots && /^https?:\/\/[^\s]+/.test(screenshots)) {
-      embed.addFields({ name: "📸 Screenshot(s)", value: screenshots });
-    } else if (screenshots) {
-      embed.addFields({
-        name: "📸 Screenshot(s)",
-        value: "⚠️ Invalid link provided — screenshots ignored.",
-      });
-    }
-
-    // 📨 Send to Dev Channel
-    const bugChannel = await interaction.client.channels.fetch(bugChannelId).catch(() => null);
-    if (!bugChannel) {
-      return submission.reply({
-        content: "❌ Could not find the bug report channel. Please contact a developer.",
-        flags: MessageFlags.Ephemeral,
-      });
-    }
-
-    await bugChannel.send({ embeds: [embed] });
-
-    await submission.reply({
-      content: "✅ Your bug report has been submitted to the development team. Thank you!",
-      flags: MessageFlags.Ephemeral,
-    });
-
-    // 🪵 Developer Log
-    if (devLogId) {
-      const devLog = await interaction.client.channels.fetch(devLogId).catch(() => null);
-      if (devLog) {
-        const logEmbed = new EmbedBuilder()
-          .setColor(0xfee75c)
-          .setTitle("🧾 Bug Report Logged")
-          .addFields(
-            { name: "Reported By", value: submission.user.tag, inline: true },
-            { name: "Roblox User", value: robloxUsername, inline: true },
-            { name: "Guild", value: interaction.guild?.name || "DM", inline: true }
-          )
-          .setTimestamp();
-
-        await devLog.send({ embeds: [logEmbed] });
-      }
-    }
   },
 };
+
+// ───────────────────────────────
+// 📩 Handle Modal Submission
+// ───────────────────────────────
+export async function handleBugModal(interaction) {
+  if (interaction.customId !== "reportbug_modal") return;
+
+  await interaction.deferReply({ flags: 64 });
+
+  const bugTitle = interaction.fields.getTextInputValue("bug_title");
+  const bugDesc = interaction.fields.getTextInputValue("bug_desc");
+  const bugSeverity = interaction.fields.getTextInputValue("bug_severity");
+  const bugScreenshots = interaction.fields.getTextInputValue("bug_screenshots") || "None provided.";
+
+  try {
+    // 🔍 Get Trello lists
+    const listsRes = await fetch(
+      `https://api.trello.com/1/boards/${TRELLO_BUGS_BOARD_ID}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+    );
+    const lists = await listsRes.json();
+
+    const bugList = lists.find(l => l.name.toLowerCase().includes("new bugs"));
+    if (!bugList) {
+      return interaction.editReply("❌ Could not find the **'New Bugs'** list on Trello.");
+    }
+
+    // 🔖 Find or create "Awaiting Review" label
+    const labelsRes = await fetch(
+      `https://api.trello.com/1/boards/${TRELLO_BUGS_BOARD_ID}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+    );
+    const labels = await labelsRes.json();
+    let awaitingLabel = labels.find(l => l.name.toLowerCase() === "awaiting review");
+
+    if (!awaitingLabel) {
+      const createLabelRes = await fetch(
+        `https://api.trello.com/1/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            idBoard: TRELLO_BUGS_BOARD_ID,
+            name: "Awaiting Review",
+            color: "yellow",
+          }),
+        }
+      );
+      awaitingLabel = await createLabelRes.json();
+    }
+
+    // 🗂️ Create Trello card
+    const cardBody = {
+      idList: bugList.id,
+      name: bugTitle,
+      desc:
+        `**Bug Title:** ${bugTitle}\n` +
+        `**Description:** ${bugDesc}\n` +
+        `**Severity:** ${bugSeverity}\n` +
+        `**Screenshots:** ${bugScreenshots}\n` +
+        `**Reported by:** ${interaction.user.tag} (${interaction.user.id})\n` +
+        `**Reported at:** ${new Date().toLocaleString()}`,
+      idLabels: [awaitingLabel.id],
+    };
+
+    const cardRes = await fetch(
+      `https://api.trello.com/1/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cardBody),
+      }
+    );
+
+    const card = await cardRes.json();
+    if (!card.id) throw new Error("Invalid Trello response");
+
+    // ✅ Confirmation Embed
+    const embed = new EmbedBuilder()
+      .setColor(0xffcc00)
+      .setTitle("🐞 Bug Report Submitted")
+      .addFields(
+        { name: "Bug Title", value: bugTitle },
+        { name: "Description", value: bugDesc.length > 1024 ? bugDesc.slice(0, 1021) + "..." : bugDesc },
+        { name: "Severity", value: bugSeverity },
+        { name: "Screenshots", value: bugScreenshots },
+        { name: "Status", value: "🟡 Awaiting Review" }
+      )
+      .setFooter({ text: "Sent to Trello Bug Tracker" })
+      .setTimestamp();
+
+    await interaction.editReply({
+      content: `✅ Bug report submitted successfully!\n[View on Trello](https://trello.com/c/${card.id})`,
+      embeds: [embed],
+    });
+
+  } catch (err) {
+    console.error("❌ Error submitting bug:", err);
+    await interaction.editReply("❌ There was an error submitting your bug report to Trello.");
+  }
+}

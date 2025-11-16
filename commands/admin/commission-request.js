@@ -4,305 +4,203 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
 } from "discord.js";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
 dotenv.config();
 
-const { TRELLO_API_KEY, TRELLO_TOKEN, TRELLO_BOARD_ID } = process.env;
+const { TRELLO_API_KEY, TRELLO_TOKEN } = process.env;
+const TRELLO_BOARD_ID = "DK6WJt1g";
+const LOG_CHANNEL_ID = "1389010246030069820";
 
-// Roles authorized to approve/deny
 const APPROVED_ROLES = [
-  "1332198337977389088",
-  "1332198334135275620",
-  "1332198329899286633",
-  "1389056453486051439",
-  "1378460548844486776",
   "1332198216560541696",
+  "1378460548844486776",
+  "1389056453486051439",
+  "1332198329899286633",
+  "1332198334135275620",
+  "1332198337977389088",
+  "1332198340288577589",
+  "1332200411586887760",
+  "1332198672720723988",
+  "1347449287046336563",
+  "1347451565623218206",
+  "1347451569372926022",
+  "1347717557674573865",
+  "1347721442392805396",
+  "1347452419230928897",
+  "1347452417595277404",
 ];
+
+// Helper: pick Trello list alphabetically
+function getAlphaList(username) {
+  const first = (username?.[0] || "").toUpperCase();
+  const map = {
+    "A-C": /[A-C]/, "D-F": /[D-F]/, "G-I": /[G-I]/,
+    "J-L": /[J-L]/, "M-O": /[M-O]/, "P-R": /[P-R]/,
+    "S-U": /[S-U]/, "V-Z": /[V-Z]/,
+  };
+  for (const [n, r] of Object.entries(map)) if (r.test(first)) return n;
+  return "A-C";
+}
+
+async function safeReply(i, payload) {
+  try {
+    if (!i.replied && !i.deferred) return await i.reply(payload);
+    return await i.followUp(payload);
+  } catch (_) {}
+}
 
 export default {
   data: new SlashCommandBuilder()
     .setName("commission-request")
-    .setDescription("Log a Commission Request to Discord and Trello.")
-    .addStringOption((o) =>
-      o.setName("username").setDescription("Roblox username").setRequired(true)
-    )
-    .addStringOption((o) =>
-      o.setName("oldrank").setDescription("Old Rank").setRequired(true)
-    )
-    .addStringOption((o) =>
-      o.setName("newrank").setDescription("New Rank").setRequired(true)
-    )
-    .addStringOption((o) =>
-      o.setName("reason").setDescription("Reason for promotion").setRequired(true)
-    )
-    .addUserOption((o) =>
-      o.setName("ping").setDescription("Ping your overseer").setRequired(true)
-    ),
+    .setDescription("Submit a commission request for review.")
+    .addStringOption(o => o.setName("username").setDescription("Roblox username").setRequired(true))
+    .addStringOption(o => o.setName("oldrank").setDescription("Old rank").setRequired(true))
+    .addStringOption(o => o.setName("newrank").setDescription("New rank").setRequired(true))
+    .addStringOption(o => o.setName("reason").setDescription("Reason for commission").setRequired(true))
+    .addUserOption(o => o.setName("ping").setDescription("User to ping").setRequired(true)),
 
   async execute(interaction) {
-    await interaction.reply({
-      content: "🗂️ Logging Commission Request...",
-      flags: 64,
-    });
-
+    await interaction.deferReply({ flags: 64 });
     const username = interaction.options.getString("username");
     const oldrank = interaction.options.getString("oldrank");
     const newrank = interaction.options.getString("newrank");
     const reason = interaction.options.getString("reason");
-    const pingUser = interaction.options.getUser("ping");
+    const ping = interaction.options.getUser("ping");
+
+    if (ping.id === interaction.user.id)
+      return interaction.editReply("🚫 You cannot submit a commission request for yourself.");
 
     try {
-      // --- Roblox Lookup ---
-      const res = await fetch("https://users.roblox.com/v1/usernames/users", {
+      // Validate Roblox user
+      const lookup = await fetch("https://users.roblox.com/v1/usernames/users", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ usernames: [username] }),
-      });
-      const data = await res.json();
-      const user = data?.data?.[0];
-      if (!user)
-        return interaction.editReply({
-          content: `❌ Roblox user **${username}** not found.`,
-        });
+      }).then(r => r.json());
+      const rb = lookup?.data?.[0];
+      if (!rb) return interaction.editReply(`❌ Roblox user **${username}** not found.`);
+      const userId = rb.id;
+      const displayName = rb.displayName;
+      const joinDate = new Date((await fetch(`https://users.roblox.com/v1/users/${userId}`).then(r => r.json())).created).toLocaleDateString();
 
-      const userId = user.id;
-      const displayName = user.displayName;
-      const profile = await fetch(
-        `https://users.roblox.com/v1/users/${userId}`
-      ).then((r) => r.json());
-      const joinDate = new Date(profile.created).toLocaleDateString();
-
-      // --- Embed + Buttons ---
+      // Base Embed
       const embed = new EmbedBuilder()
-        .setColor(0x2b88d8)
+        .setColor(0x43b581)
         .setTitle("📗 Commission Request")
-        .setDescription(
-          `**Username:** ${username}\n**Old Rank:** ${oldrank}\n**New Rank:** ${newrank}\n**Reason:** ${reason}\n**Ping:** <@${pingUser.id}>`
-        )
-        .addFields(
-          { name: "Display Name", value: displayName, inline: true },
-          { name: "Join Date", value: joinDate, inline: true },
-          { name: "Status", value: "🟡 Pending Review" }
-        )
+        .setDescription(`**Username:** ${username}\n**Old Rank:** ${oldrank}\n**New Rank:** ${newrank}\n**Reason:** ${reason}\n**Ping:** ${ping}\n\n**Display Name:** ${displayName}\n**Join Date:** ${joinDate}`)
         .setFooter({ text: `Logged by ${interaction.user.tag}` })
         .setTimestamp();
 
-      const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("commission_accept")
-          .setLabel("Approve")
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId("commission_deny")
-          .setLabel("Deny")
-          .setStyle(ButtonStyle.Danger)
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("commission_accept").setLabel("Approve").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId("commission_deny").setLabel("Deny").setStyle(ButtonStyle.Danger)
       );
 
-      const logChannel = await interaction.client.channels.fetch(
-        "1389010246030069820"
-      );
-      const sentMsg = await logChannel.send({
-        content: `<@${pingUser.id}> — new commission request logged.`,
-        embeds: [embed],
-        components: [buttons],
-      });
+      const logChannel = await interaction.client.channels.fetch(LOG_CHANNEL_ID);
+      const sentMsg = await logChannel.send({ content: `${ping}`, embeds: [embed], components: [row] });
 
-      // --- Trello Setup ---
-      const lists = await fetch(
-        `https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
-      ).then((r) => r.json());
+      // Trello list & card
+      const listName = getAlphaList(username);
+      const lists = await fetch(`https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`).then(r => r.json());
+      const targetList = lists.find(l => l.name.toUpperCase() === listName.toUpperCase());
+      if (!targetList) throw new Error(`Trello list ${listName} not found`);
 
-      const firstChar = username[0].toUpperCase();
-      const ranges = {
-        "0-9": /^[0-9]/,
-        "A-C": /^[A-C]/,
-        "D-F": /^[D-F]/,
-        "G-I": /^[G-I]/,
-        "J-L": /^[J-L]/,
-        "M-O": /^[M-O]/,
-        "P-R": /^[P-R]/,
-        "S-U": /^[S-U]/,
-        "V-Z": /^[V-Z]/,
-      };
-      let listName = "0-9";
-      for (const [range, regex] of Object.entries(ranges))
-        if (regex.test(firstChar)) listName = range;
-
-      const list = lists.find((l) => l.name === listName);
-      if (!list)
-        return interaction.editReply({
-          content: `❌ Could not find Trello list for ${listName}.`,
-        });
-
-      const cards = await fetch(
-        `https://api.trello.com/1/lists/${list.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
-      ).then((r) => r.json());
-
+      const cards = await fetch(`https://api.trello.com/1/lists/${targetList.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`).then(r => r.json());
       const cardName = `${username} (${userId})`;
-      let card = cards.find(
-        (c) => c.name.toLowerCase() === cardName.toLowerCase()
-      );
+      let card = cards.find(c => c.name.toLowerCase() === cardName.toLowerCase());
 
-      const desc = `**Roblox Username:** ${username}\n**Display Name:** ${displayName}\n**Roblox ID:** ${userId}\n**Join Date:** ${joinDate}`;
-
-      // --- Create card if not found ---
       if (!card) {
-        const res = await fetch(
-          `https://api.trello.com/1/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ idList: list.id, name: cardName, desc }),
-          }
-        );
-        card = await res.json();
-      }
-
-      // --- Trello Comment (log entry) ---
-      const comment = `🟡 Commission Request Logged\nBy: ${interaction.user.tag}\nDate: ${new Date().toUTCString()}\n**Old Rank:** ${oldrank}\n**New Rank:** ${newrank}\n**Reason:** ${reason}`;
-      await fetch(
-        `https://api.trello.com/1/cards/${card.id}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-        {
+        card = await fetch(`https://api.trello.com/1/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            text: `${comment}\n\n[View Discord Log](https://discord.com/channels/${interaction.guild.id}/${logChannel.id}/${sentMsg.id})`,
+            idList: targetList.id,
+            name: cardName,
+            desc: `**Roblox Username:** ${username}\n**Display Name:** ${displayName}\n**Roblox ID:** ${userId}\n**Join Date:** ${joinDate}`,
           }),
-        }
-      );
+        }).then(r => r.json());
+      }
 
-      await interaction.editReply({
-        content: `✅ Commission Request for **${username}** logged successfully and sent to <@${pingUser.id}>.`,
+      // Add initial comment
+      await fetch(`https://api.trello.com/1/cards/${card.id}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text:
+            `📝 **Commission Request**\nSubmitted by: ${interaction.user.tag}\nOld Rank: ${oldrank}\nNew Rank: ${newrank}\nReason: ${reason}\nStatus: Pending Review\n[Discord Link](https://discord.com/channels/${interaction.guild.id}/${logChannel.id}/${sentMsg.id})`,
+        }),
       });
 
-      // 🧠 Collector for Buttons
-      const collector = sentMsg.createMessageComponentCollector({
-        time: 60 * 60 * 1000,
-      });
+      await interaction.editReply(`✅ Commission request logged to Trello under **${listName}**.`);
 
-      collector.on("collect", async (i) => {
+      // Buttons
+      const collector = sentMsg.createMessageComponentCollector({ time: 60 * 60 * 1000 });
+      collector.on("collect", async i => {
         const member = await i.guild.members.fetch(i.user.id).catch(() => null);
-        const isAuthorized =
-          i.user.id === pingUser.id ||
-          member?.roles.cache.some((r) => APPROVED_ROLES.includes(r.id));
+        if (!member?.roles.cache.some(r => APPROVED_ROLES.includes(r.id)))
+          return safeReply(i, { content: "🚫 You are not authorized to manage this request.", flags: 64 });
 
-        if (!isAuthorized) {
-          if (!i.replied && !i.deferred)
-            return i.reply({
-              content: "🚫 You are not authorized to manage this request.",
-              flags: 64,
-            });
-          return;
-        }
-
-        // ✅ Approve
+        // APPROVE
         if (i.customId === "commission_accept") {
-          await i.deferUpdate();
-
-          const approvedEmbed = EmbedBuilder.from(embed)
+          await i.deferUpdate().catch(() => {});
+          const approved = EmbedBuilder.from(embed)
             .setColor(0x57f287)
-            .spliceFields(2, 1, {
-              name: "Status",
-              value: `✅ Approved by ${i.user.tag}`,
-            });
+            .setDescription(`**Username:** ${username}\n**Old Rank:** ${oldrank}\n**New Rank:** ${newrank}\n**Reason:** ${reason}\n**Ping:** ${ping}\n\n✅ **Approved by ${i.user.tag}**`)
+            .setFooter({ text: `Approved • ${new Date().toLocaleString()}` });
+          await sentMsg.edit({ embeds: [approved], components: [] }).catch(() => {});
 
-          await sentMsg
-            .edit({ embeds: [approvedEmbed], components: [] })
-            .catch(() => null);
-
-          const trelloComment = `✅ Commission Approved\nBy: ${i.user.tag}\nDate: ${new Date().toUTCString()}`;
-          await fetch(
-            `https://api.trello.com/1/cards/${card.id}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ text: trelloComment }),
-            }
-          ).catch(() => null);
-
-          await i.channel.send({
-            content: `✅ Commission request approved by ${i.user}.`,
-          });
+          // ✅ Post a new update comment (not edit)
+          await fetch(`https://api.trello.com/1/cards/${card.id}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: `✅ **Approved by ${i.user.tag}**\nUser: ${username}\nRank: ${oldrank} → ${newrank}\nDate: ${new Date().toUTCString()}`,
+            }),
+          }).catch(() => {});
         }
 
-        // ❌ Deny
+        // DENY
         if (i.customId === "commission_deny") {
-          const modal = new ModalBuilder()
-            .setCustomId("commission_deny_modal")
-            .setTitle("Deny Commission Request");
+          await safeReply(i, { content: "✏️ Reply with reason (60s).", flags: 64 });
+          const filter = m => m.author.id === i.user.id;
+          const collected = await i.channel.awaitMessages({ filter, max: 1, time: 60_000 }).catch(() => null);
+          if (!collected?.size)
+            return safeReply(i, { content: "❌ No reason given. Cancelled.", flags: 64 });
+          const reasonText = collected.first().content;
+          await collected.first().delete().catch(() => {});
 
-          const reasonInput = new TextInputBuilder()
-            .setCustomId("deny_reason")
-            .setLabel("Reason for Denial")
-            .setStyle(TextInputStyle.Paragraph)
-            .setRequired(true);
-
-          modal.addComponents(
-            new ActionRowBuilder().addComponents(reasonInput)
-          );
-          await i.showModal(modal);
-
-          const modalSubmit = await i
-            .awaitModalSubmit({
-              time: 5 * 60 * 1000,
-              filter: (m) =>
-                m.customId === "commission_deny_modal" &&
-                m.user.id === i.user.id,
-            })
-            .catch(() => null);
-
-          if (!modalSubmit) return;
-
-          await modalSubmit.deferReply({ ephemeral: true });
-          const denyReason =
-            modalSubmit.fields.getTextInputValue("deny_reason");
-
-          const deniedEmbed = EmbedBuilder.from(embed)
+          const denied = EmbedBuilder.from(embed)
             .setColor(0xed4245)
-            .spliceFields(2, 1, {
-              name: "Status",
-              value: `❌ Denied by ${i.user.tag}\n**Reason:** ${denyReason}`,
-            });
+            .setDescription(`**Username:** ${username}\n**Old Rank:** ${oldrank}\n**New Rank:** ${newrank}\n**Reason:** ${reason}\n**Ping:** ${ping}\n\n❌ **Denied by ${i.user.tag}**\n**Reason:** ${reasonText}`)
+            .setFooter({ text: `Denied • ${new Date().toLocaleString()}` });
+          await sentMsg.edit({ embeds: [denied], components: [] }).catch(() => {});
 
-          await sentMsg
-            .edit({ embeds: [deniedEmbed], components: [] })
-            .catch(() => null);
-
-          const trelloComment = `❌ Commission Denied\nBy: ${i.user.tag}\nReason: ${denyReason}\nDate: ${new Date().toUTCString()}`;
-          await fetch(
-            `https://api.trello.com/1/cards/${card.id}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ text: trelloComment }),
-            }
-          ).catch(() => null);
-
-          await modalSubmit.editReply({
-            content: `❌ Commission request denied by ${i.user}.`,
-          });
+          // ❌ Post denial update comment
+          await fetch(`https://api.trello.com/1/cards/${card.id}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: `❌ **Denied by ${i.user.tag}**\nReason: ${reasonText}\nUser: ${username}\nRank: ${oldrank} → ${newrank}\nDate: ${new Date().toUTCString()}`,
+            }),
+          }).catch(() => {});
         }
       });
 
       collector.on("end", async () => {
-        const expiredEmbed = EmbedBuilder.from(embed).spliceFields(2, 1, {
-          name: "Status",
-          value: "⚫ Review period expired",
-        });
-        await sentMsg
-          .edit({ embeds: [expiredEmbed], components: [] })
-          .catch(() => null);
+        await sentMsg.edit({
+          embeds: [
+            EmbedBuilder.from(embed)
+              .setColor(0x808080)
+              .setFooter({ text: `Review period expired • ${new Date().toLocaleString()}` }),
+          ],
+          components: [],
+        }).catch(() => {});
       });
     } catch (err) {
-      console.error(err);
-      await interaction.editReply({
-        content: "❌ Error logging Commission Request.",
-      });
+      console.error("❌ Error in /commission-request:", err);
+      await interaction.editReply("❌ An error occurred while processing this request.");
     }
   },
 };

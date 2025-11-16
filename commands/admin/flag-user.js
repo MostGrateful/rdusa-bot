@@ -7,10 +7,12 @@ import fetch from "node-fetch";
 import dotenv from "dotenv";
 dotenv.config();
 
-const { TRELLO_API_KEY, TRELLO_TOKEN } = process.env;
-
-// Trello Personnel board
-const TRELLO_BOARD_ID = "DK6WJt1g";
+const {
+  TRELLO_API_KEY,
+  TRELLO_TOKEN,
+  TRELLO_BOARD_SHORTLINK, // shortlink: DK6WJt1g
+  TRELLO_BOARD_ID,        // real board id: 60b747b8f127c90bdec5ca84
+} = process.env;
 
 // Role that can use this command
 const FLAG_MANAGER_ROLE_ID = "1387212542245339209";
@@ -18,6 +20,15 @@ const FLAG_MANAGER_ROLE_ID = "1387212542245339209";
 // Mod log + Dev command log channels
 const MOD_LOG_CHANNEL_ID = "1439479062572699739";
 const DEV_COMMAND_LOG_CHANNEL_ID = "1388886528968622080";
+
+/**
+ * Basic Roblox username validation
+ */
+function isValidRobloxUsername(username) {
+  const trimmed = username.trim();
+  if (trimmed.length < 3 || trimmed.length > 20) return false;
+  return /^[A-Za-z0-9_]+$/.test(trimmed);
+}
 
 /**
  * Get Roblox user by username
@@ -55,7 +66,6 @@ async function fetchRobloxUser(username) {
 
 /**
  * Decide which list a user should be filed under (A-C, D-F, etc.)
- * You can tweak these ranges to exactly match your Trello board.
  */
 function getListNameForUsername(username) {
   const first = username[0]?.toUpperCase() || "A";
@@ -70,25 +80,63 @@ function getListNameForUsername(username) {
 }
 
 /**
- * Find existing personnel card for this username (case-insensitive),
- * or create a new one in the correct list with base description.
+ * Find the existing personnel card for this user or create one.
+ * IMPORTANT: uses the SAME naming convention as /backgroundcheck:
+ *   "<Username> (<RobloxID>)"
+ *
+ * If an older card exists with just "Username", it will be renamed
+ * to "Username (RobloxID)" so things stay consistent.
  */
 async function findOrCreateUserCard(userInfo) {
-  // 1) Get all cards on the board
+  // 1) Get all cards on the board (using shortlink)
   const cardsRes = await fetch(
-    `https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+    `https://api.trello.com/1/boards/${TRELLO_BOARD_SHORTLINK}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
   );
+  if (!cardsRes.ok) {
+    const txt = await cardsRes.text();
+    throw new Error(`Failed to fetch Trello cards: ${txt}`);
+  }
   const cards = await cardsRes.json();
 
-  const existing = cards.find(
-    (c) => c.name.toLowerCase() === userInfo.username.toLowerCase()
+  const desiredName = `${userInfo.username} (${userInfo.id})`.toLowerCase();
+  const plainName = userInfo.username.toLowerCase();
+
+  // Try to find an existing card with the standardized name
+  let existing = cards.find(
+    (c) => c.name && c.name.toLowerCase() === desiredName
   );
-  if (existing) return existing;
+
+  // If not found, also accept an older card named just "Username"
+  if (!existing) {
+    existing = cards.find(
+      (c) => c.name && c.name.toLowerCase() === plainName
+    );
+    // If we found a "plain username" card, rename it to the standard form
+    if (existing) {
+      await fetch(
+        `https://api.trello.com/1/cards/${existing.id}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: `${userInfo.username} (${userInfo.id})` }),
+        }
+      ).catch(() => null);
+      existing.name = `${userInfo.username} (${userInfo.id})`;
+    }
+  }
+
+  if (existing) {
+    return existing;
+  }
 
   // 2) Need to create a new card in the appropriate list
   const listsRes = await fetch(
-    `https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+    `https://api.trello.com/1/boards/${TRELLO_BOARD_SHORTLINK}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
   );
+  if (!listsRes.ok) {
+    const txt = await listsRes.text();
+    throw new Error(`Failed to fetch Trello lists: ${txt}`);
+  }
   const lists = await listsRes.json();
 
   const listName = getListNameForUsername(userInfo.username);
@@ -109,7 +157,7 @@ async function findOrCreateUserCard(userInfo) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         idList: targetList.id,
-        name: userInfo.username,
+        name: `${userInfo.username} (${userInfo.id})`,
         desc,
       }),
     }
@@ -125,21 +173,27 @@ async function findOrCreateUserCard(userInfo) {
 
 /**
  * Ensure labels exist for each flag and attach them to the card.
+ * Uses REAL board ID for label creation.
  * Returns array of label names actually attached.
  */
 async function ensureLabelsForFlags(cardId, flags) {
   if (!flags.length) return [];
 
-  // 1) Get existing labels on the board
+  // 1) Get existing labels on the REAL board
   const labelsRes = await fetch(
     `https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&limit=1000`
   );
+  if (!labelsRes.ok) {
+    const txt = await labelsRes.text();
+    console.error("❌ Failed to fetch labels:", txt);
+    return [];
+  }
   const labels = await labelsRes.json();
 
   const attachedLabels = [];
 
-  for (const flagNameRaw of flags) {
-    const flagName = flagNameRaw.trim();
+  for (const raw of flags) {
+    const flagName = raw.trim();
     if (!flagName) continue;
 
     // Find existing label by name (case-insensitive)
@@ -147,7 +201,7 @@ async function ensureLabelsForFlags(cardId, flags) {
       (l) => l.name && l.name.toLowerCase() === flagName.toLowerCase()
     );
 
-    // If not found, create a new label
+    // If not found, create a new yellow label
     if (!label) {
       const createLabelRes = await fetch(
         `https://api.trello.com/1/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
@@ -157,8 +211,7 @@ async function ensureLabelsForFlags(cardId, flags) {
           body: JSON.stringify({
             idBoard: TRELLO_BOARD_ID,
             name: flagName,
-            // Trello valid colors: green, yellow, orange, red, purple, blue, sky, pink, lime, black, null
-            color: "black",
+            color: "yellow",
           }),
         }
       );
@@ -172,15 +225,18 @@ async function ensureLabelsForFlags(cardId, flags) {
     }
 
     // Attach label to card
-    try {
-      await fetch(
-        `https://api.trello.com/1/cards/${cardId}/idLabels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&value=${label.id}`,
-        { method: "POST" }
-      );
-      attachedLabels.push(flagName);
-    } catch (err) {
-      console.error("❌ Failed to attach label:", err);
+    const attachRes = await fetch(
+      `https://api.trello.com/1/cards/${cardId}/idLabels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&value=${label.id}`,
+      { method: "POST" }
+    );
+
+    if (!attachRes.ok) {
+      const txt = await attachRes.text();
+      console.error("❌ Failed to attach label:", txt);
+      continue;
     }
+
+    attachedLabels.push(flagName);
   }
 
   return attachedLabels;
@@ -231,6 +287,14 @@ export default {
     const reasonInput = interaction.options.getString("reason").trim();
     const approvedByInput = interaction.options.getString("approved_by").trim();
 
+    // Local Roblox username validation
+    if (!isValidRobloxUsername(usernameInput)) {
+      return interaction.editReply(
+        "❌ That doesn’t look like a valid Roblox username.\n" +
+          "Usernames must be 3–20 characters and can only contain letters, numbers, and underscores."
+      );
+    }
+
     if (!flagsInput) {
       return interaction.editReply("🚫 You must specify at least one flag.");
     }
@@ -253,32 +317,36 @@ export default {
         );
       }
 
-      // 2) Trello card (find or create)
+      // 2) Trello card (find or create, shared with /backgroundcheck)
       const card = await findOrCreateUserCard(userInfo);
 
       // 3) Ensure labels exist + attach to card
       const attachedFlags = await ensureLabelsForFlags(card.id, flagNames);
 
-      // 4) Add Trello comment log
+      // 4) Build Trello comment (your format)
       const commentText =
-        `Username: ${userInfo.username} (${userInfo.id})\n` +
-        `Flag(s) Added: ${attachedFlags.join(", ") || "None"}\n` +
+        `Username: ${userInfo.username}\n` +
+        `Flag(s) Added: ${
+          attachedFlags.length ? attachedFlags.join(", ") : "None"
+        }\n` +
         `Reason: ${reasonInput}\n` +
         `Submitted by: ${interaction.user.tag}\n` +
-        `Approved by: ${approvedByInput}`;
+        `Approved by: ${approvedByInput || "N/A"}\n` +
+        `Date: ${new Date().toUTCString()}`;
 
-      await fetch(
-        `https://api.trello.com/1/cards/${card.id}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: commentText }),
-        }
+      const commentUrl =
+        `https://api.trello.com/1/cards/${card.id}/actions/comments` +
+        `?key=${TRELLO_API_KEY}` +
+        `&token=${TRELLO_TOKEN}` +
+        `&text=${encodeURIComponent(commentText)}`;
+
+      await fetch(commentUrl, { method: "POST" }).catch((err) =>
+        console.error("❌ Failed to create Trello comment:", err)
       );
 
       // 5) Build log embed
       const logEmbed = new EmbedBuilder()
-        .setColor(0xff4757)
+        .setColor(0xffd32a)
         .setTitle("🚩 User Flag Added")
         .addFields(
           {
@@ -293,7 +361,9 @@ export default {
           },
           {
             name: "Flags Added",
-            value: attachedFlags.join(", "),
+            value: attachedFlags.length
+              ? attachedFlags.join(", ")
+              : "None (label attach failed)",
             inline: false,
           },
           {

@@ -147,7 +147,7 @@ async function ensureLabelsForFlags(cardId, flags) {
       (l) => l.name && l.name.toLowerCase() === flagName.toLowerCase()
     );
 
-    // If not found, create a new grey label
+    // If not found, create a new label
     if (!label) {
       const createLabelRes = await fetch(
         `https://api.trello.com/1/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
@@ -157,7 +157,8 @@ async function ensureLabelsForFlags(cardId, flags) {
           body: JSON.stringify({
             idBoard: TRELLO_BOARD_ID,
             name: flagName,
-            color: "grey", // default color
+            // Trello valid colors: green, yellow, orange, red, purple, blue, sky, pink, lime, black, null
+            color: "black",
           }),
         }
       );

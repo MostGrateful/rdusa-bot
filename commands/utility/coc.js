@@ -47,7 +47,7 @@ export default {
           `**Chief of Staff of the Army**\n<:O10:1347702372960305274> General, zlpzq\n\n` +
           `**Vice Chief of Staff of the Army**\n<:O10:1347702372960305274> General, Defy_Il\n\n` +
           `**Sergeant Major of the Army**\n<:E9C:1398420212302352576> Sergeant Major of the Army, LuaPresence\n\n` +
-          `**Director of Army Staff**\n<:O9:1347702371559669800> Lieutenant General, Vacant\n\n` +
+          `**Director of Army Staff**\n<:O9:1347702371559669800> Lieutenant General, Mountainbikerd101\n\n` +
           `**Inspector General of the Army**\n<:O9:1347702371559669800> Lieutenant General, Vacant\n\n` +
           `**Judge Advocate General of The Army**\n<:O9:1347702371559669800> Lieutenant General, Madalloy9651`
         )

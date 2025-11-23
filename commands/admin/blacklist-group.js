@@ -17,7 +17,7 @@ const TRELLO_LIST_NAME = "Group Blacklist";
 const STAFF_ROLE_ID = "1387212542245339209";
 
 // Mod-log channel in main server
-const MOD_LOG_CHANNEL_ID = "1388886511474442250";
+const MOD_LOG_CHANNEL_ID = "1439479062572699739";
 
 // Dev server command log channel
 const DEV_COMMAND_LOG_CHANNEL_ID = "1388886528968622080";

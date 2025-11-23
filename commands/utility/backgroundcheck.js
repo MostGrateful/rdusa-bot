@@ -267,12 +267,17 @@ export default {
 
       const hasFlags = allFlags.length > 0;
 
-      // 🗒️ Trello comment in your exact format
+      // 🗒️ Trello comment with dynamic emoji based on result
+      const statusEmoji = hasFlags ? "🚩" : "✅";
+      const flagsLine = hasFlags
+        ? `Flags: 🚩 ${allFlags.join(", ")}`
+        : "Flags: ✅ No flags found";
+
       const commentText =
-        `✅ Background Check Completed\n` +
+        `${statusEmoji} Background Check Completed\n` +
         `Checked by: ${interaction.user.username}\n` +
         `Date: ${new Date().toUTCString()}\n` +
-        `Flags: ${hasFlags ? allFlags.join(", ") : "No flags found"}`;
+        `${flagsLine}`;
 
       const commentUrl =
         `https://api.trello.com/1/cards/${userCard.id}/actions/comments` +

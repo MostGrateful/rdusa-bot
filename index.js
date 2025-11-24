@@ -94,7 +94,7 @@ await loadCommands(path.join(__dirname, "commands"));
 async function loadEvents() {
   const eventsPath = path.join(__dirname, "events");
   if (!fs.existsSync(eventsPath)) return;
-  const eventFiles = fs.readdirSync(eventsPath).filter(f => f.endsWith(".js"));
+  const eventFiles = fs.readdirSync(eventsPath).filter((f) => f.endsWith(".js"));
   for (const file of eventFiles) {
     const { default: event } = await import(`file://${path.join(eventsPath, file)}`);
     if (!event || !event.name) continue;
@@ -150,6 +150,12 @@ client.once("clientReady", async () => {
 client.on("interactionCreate", async (interaction) => {
   const { TRELLO_API_KEY, TRELLO_TOKEN } = process.env;
 
+  // ✅ Suggestion Modal
+  if (interaction.isModalSubmit() && interaction.customId === "suggest_modal") {
+    const { handleSuggestModal } = await import("./commands/utility/suggest.js");
+    return handleSuggestModal(interaction);
+  }
+
   // ✅ Bug Report Modal
   if (interaction.isModalSubmit() && interaction.customId === "reportbug_modal") {
     const { handleBugModal } = await import("./commands/utility/reportbug.js");
@@ -178,7 +184,7 @@ client.on("interactionCreate", async (interaction) => {
 
   if (interaction.isButton()) {
     const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-    const isAuthorized = member?.roles.cache.some(r => APPROVED_ROLES.includes(r.id));
+    const isAuthorized = member?.roles.cache.some((r) => APPROVED_ROLES.includes(r.id));
     if (!isAuthorized) {
       try {
         if (!interaction.replied && !interaction.deferred) {
@@ -290,13 +296,15 @@ client.on("interactionCreate", async (interaction) => {
       `https://api.trello.com/1/boards/${BOARD_ID}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
     );
     const lists = await listsRes.json();
-    const blacklistList = lists.find(l => l.name.toLowerCase() === LIST_NAME.toLowerCase());
+    const blacklistList = lists.find(
+      (l) => l.name.toLowerCase() === LIST_NAME.toLowerCase()
+    );
     if (!blacklistList) return;
     const cardsRes = await fetch(
       `https://api.trello.com/1/lists/${blacklistList.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
     );
     const cards = await cardsRes.json();
-    const isBlacklisted = cards.some(c => c.name.includes(interaction.user.id));
+    const isBlacklisted = cards.some((c) => c.name.includes(interaction.user.id));
     if (isBlacklisted) {
       return interaction.reply({
         content: "🚫 You are blacklisted from using this bot.",

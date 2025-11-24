@@ -17,9 +17,9 @@ export default {
         .setColor(0x2b2d31)
         .setTitle("**Section 1**")
         .setDescription(
-          `### <:POTUS:1389860236084379728> **Cabinet**\n` +
-          `**Commander in Chief**\n<:POTUS:1389860236084379728> President, ReaperDevCollins\n\n` +
-          `**Vice Commander in Chief**\n<:VPOTUS:1389860232762490920> Vice President, jaiddkk`
+          `### <:jcos:1439850733351735368> **Office of Joint Chiefs of Staff**\n` +
+          `**Chairman of the Joint Chiefs of Staff**\n<:CJCSFlag:1439849441883459664> Chairman, ReaperDevCollins\n\n` +
+          `**Vice Chairman of the Joint Chiefs of Staff**\n<:VCJCSFlag:1439849522456166471>  Vice Chairman, jaiddkk`
         )
         .setFooter({ text: "United States Army | Section 1" });
 
@@ -30,9 +30,8 @@ export default {
         .setColor(0x5865f2)
         .setTitle("**Section 2**")
         .setDescription(
-          `### <:XOPOTUS:1417239012061610004> **Executive Office of the President**\n` +
-          `**National Security Advisor**\n<:XOPOTUS:1417239012061610004> Advisor, ItsOfficiaIPhantom\n\n` +
-          `**Deputy National Security Advisor**\n<:XOPOTUS:1417239012061610004> Deputy Advisor, Vacant`
+          `### <:SEACFlag:1439849668052910251> **Advisor Office of the Joint Chiefs of Staff**\n` +
+          `**Senior Enlisted Advisor to the Chairman**\n<:SEACFlag:1439849668052910251> Advisor, ItsOfficiaIPhantom\n\n` 
         )
         .setFooter({ text: "United States Army | Section 2" });
 
@@ -54,11 +53,51 @@ export default {
         .setFooter({ text: "United States Army | Section 3" });
 
       // ───────────────────────────────
+      // 🟨 Section 4 — Office of Community Staff
+      // ───────────────────────────────
+      const section4 = new EmbedBuilder()
+        .setColor(0xf1c40f)
+        .setTitle("**Section 4**")
+        .setDescription(
+          `## <:Staff:1386578212531732531> **Office of Community Staff**\n\n` +
+          `**Community Staff Leadership**\n` +
+          `<:CM:1371116692448743454> Director, LuaPresence\n` +
+          `<:CM:1371116692448743454> Deputy Director, VortexInception\n\n` +
+          `**Head of Department**\n` +
+          `<:SeniorStaff:1386577957899997294> Director of Moderation, mountainbikenerd101\n` +
+          `<:SeniorStaff:1386577957899997294> Director of Public Relations, Vacant\n\n` +
+          `**Deputy Head of Department**\n` +
+          `<:SeniorStaff:1386577957899997294> Deputy Director of Moderation, Vacant\n` +
+          `<:SeniorStaff:1386577957899997294> Deputy Director of Public Relations, Vacant\n\n` 
+        )
+        .setFooter({ text: "United States Army | Section 4" });
+
+      // ───────────────────────────────
+      // 🟪 Section 5 — Office of Development
+      // ───────────────────────────────
+      const section5 = new EmbedBuilder()
+        .setColor(0x9b59b6)
+        .setTitle("**Section 5**")
+        .setDescription(
+          `## <:FUTCOM:1432939435150020730> **Office of Development**\n\n` +
+          `**Development Leadership**\n` +
+          `<:headdeve:1442350757881053236> Head Developer, PhoenixInception\n` +
+          `<:aheaddev:1442350699278237747> Assistant Developer & Bot Developer, James_Ashworth\n\n` +
+          `**Development Team**\n` +
+          `<:developer:1442350728298364972> Developer, Draxvonz\n` +
+          `<:trialdev:1442350585100763308>Trial Developer, Pdanielv0813alt\n` +
+          `<:trialdev:1442350585100763308> Trial Developer, Hello463`
+        )
+        .setFooter({ text: "United States Army | Section 5" });
+
+      // ───────────────────────────────
       // 📬 Send All Sections
       // ───────────────────────────────
       await interaction.channel.send({ embeds: [section1] });
       await interaction.channel.send({ embeds: [section2] });
       await interaction.channel.send({ embeds: [section3] });
+      await interaction.channel.send({ embeds: [section4] });
+      await interaction.channel.send({ embeds: [section5] });
 
       await interaction.editReply({ content: "✅ Chain of Command embeds posted successfully." });
     } catch (error) {

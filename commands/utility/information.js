@@ -1,163 +1,52 @@
 import { SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits } from "discord.js";
+import { getEmbedSections } from "../../utils/embedStore.js";
 
-const INFORMATION_CHANNEL_ID = "1388887221620310087";
+const EMBED_KEY = "information";
+const INFO_CHANNEL_ID = "1388887221620310087";
 
 export default {
   data: new SlashCommandBuilder()
     .setName("information")
-    .setDescription("Post the information embeds for the United States Army.")
+    .setDescription("Post the USAR information embeds.")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
-  async execute(interaction) {
+  async execute(interaction, client) {
+    const db = client.db;
     await interaction.deferReply({ flags: 64 });
 
     try {
+      const sections = await getEmbedSections(db, EMBED_KEY);
+
+      if (!sections.length) {
+        return interaction.editReply(
+          "❌ No information sections found in the database. Ask a bot admin to insert them into `embed_sections`."
+        );
+      }
+
       const infoChannel = await interaction.client.channels
-        .fetch(INFORMATION_CHANNEL_ID)
+        .fetch(INFO_CHANNEL_ID)
         .catch(() => null);
 
       if (!infoChannel) {
-        await interaction.editReply(
-          "❌ Could not find the information channel. Please verify the channel ID."
-        );
-        return;
+        return interaction.editReply("❌ Could not find the information channel.");
       }
 
-      // ───────────────────────────────
-      // 🟦 Section 1 — Documentation
-      // ───────────────────────────────
-      const section1 = new EmbedBuilder()
-        .setColor(0x2b2d31)
-        .setTitle("**Section 1**")
-        .setDescription(
-          `## Documentation\n\n` +
-          `**Uniform Code of Military Justice**\n` +
-          `https://docs.google.com/document/d/181YTyOY8rKWa7UjSvdof9WqdvZ3Rcl-2l4aTjlYAiKk/edit?tab=t.0\n\n` +
-          `**Awards Trello**\n` +
-          `https://trello.com/b/q14JsBw0/usar-awards-database\n\n` +
-          `**Administrative Guidelines**\n` +
-          `https://docs.google.com/document/d/1rPvQaFgNMmeCe9x9VL7FdCcb8Nj3sandxkk7Vf27zcA/edit?usp=sharing\n\n` +
-          `**Regulations and Orders Database**\n` +
-          `https://trello.com/b/lZ9zjhSR/orders-and-regulations\n\n` +
-          `**Development Tracker**\n` +
-          `https://trello.com/b/ioz9FgVr/development-list\n\n` +
-          `**Bot Development Tracker**\n` +
-          `https://trello.com/b/DKT2EOoh/rdusa-bot-development`
-        )
-        .setFooter({ text: "United States Army | Information Section 1" });
+      for (const section of sections) {
+        const embed = new EmbedBuilder()
+          .setColor(
+            typeof section.color === "number" ? section.color : 0x2b2d31
+          )
+          .setTitle(`**${section.title || `Section ${section.section_index}`}**`)
+          .setDescription(section.description || "*(No description set)*")
+          .setFooter({ text: `USAR Information | ${section.title || ""}` });
 
-      // ───────────────────────────────
-      // 🟩 Section 2 — Frequently Asked Questions
-      // ───────────────────────────────
-      const section2 = new EmbedBuilder()
-        .setColor(0x57f287)
-        .setTitle("**Section 2**")
-        .setDescription(
-          `## Frequently Asked Questions\n\n` +
+        await infoChannel.send({ embeds: [embed] });
+      }
 
-          `**What do I do if I buy a rank?**\n` +
-          `You will go to the support channel and click on "Questions" then submit proof of the rank being bought.\n\n` +
-
-          `**What is IRL Military Role?**\n` +
-          `It's a role given to all former/current Real Life military service members in the United States Military.\n` +
-          `To get the role, you must provide proof of your CAC and blank out any sensitive information.\n` +
-          `You will also need a piece of paper with your Discord Username on it. After that you will send the picture to **ReaperDevCollins** (The Owner).\n\n` +
-
-          `**What is IRL First Responder Role?**\n` +
-          `It's a role given to all former/current Real Life First Responders in the United States.\n` +
-          `To get the role, you must provide a department-issued ID with all personal information blanked out, along with your Discord Username on a piece of paper.\n` +
-          `You will then send the proof to **ReaperDevCollins**.\n\n` +
-
-          `**What are the perks of boosting?**\n` +
-          `You will get the following:\n` +
-          `• E5 (If not above the rank already)\n` +
-          `• Image perms\n` +
-          `• An exclusive channel with development sneak peeks\n` +
-          `• A server boosting role with a shiny name\n\n` +
-
-          `**What are the perks of VIP and how do I get it?**\n` +
-          `VIPs get the following:\n` +
-          `• E7 (If not above the rank already)\n` +
-          `• Image perms\n` +
-          `• A VIP role with a shiny name\n` +
-          `• An exclusive chatroom\n` +
-          `• Ability to ping NSA+ without moderation\n\n` +
-          `To get VIP you must be trusted by the VCIC+ and/or have contributed massively to the group\n` +
-          `(buying all the gamepasses alone does **not** count).`
-        )
-        .setFooter({ text: "United States Army | Information Section 2" });
-
-      // ───────────────────────────────
-      // 🟨 Section 3 — Division Information
-      // ───────────────────────────────
-      const section3 = new EmbedBuilder()
-        .setColor(0xf1c40f)
-        .setTitle("**Section 3**")
-        .setDescription(
-          `## Division Information\n` +
-          `All divisions have a public Discord server.\n\n` +
-
-          `**Main Group**\n` +
-          `Roblox Group: https://www.roblox.com/communities/35514277/RDUSA-United-States-Army#!/about\n\n` +
-
-          `**Judge Advocate General Corps**\n` +
-          `JAGC Server Link: https://discord.gg/wqskXJ2M7s\n\n` +
-
-          `**Office of the Inspector General Corps**\n` +
-          `OIG Discord Server: https://discord.gg/bmrfxQqs97\n\n` +
-
-          `**Quartermaster Corps**\n` +
-          `Quartermaster Corps Server: https://discord.gg/A7G4hss8Uy\n\n` +
-
-          `**Army Foreign Affairs**\n` +
-          `Army Foreign Affairs Server: https://discord.gg/WQDmSVuEYU\n\n` +
-
-          `**Training and Doctrine Command**\n` +
-          `TRADOC Server Link: https://discord.gg/rcY2qeD7xZ\n` +
-          `OCS Server Link: https://discord.gg/Vv2UfeBuAe\n` +
-          `CIMT Server Link: TBA\n` +
-          `DSA Server Link: TBA\n\n` +
-
-          `**Military Police Corps**\n` +
-          `MP Server Link: https://discord.gg/GaT6F3F4et\n` +
-          `CID Server Link: https://discord.gg/X6qBNm9xVq\n` +
-          `385th Server Link: https://discord.gg/McAG2nJkVj\n` +
-          `91st Server Link: https://discord.gg/dmdd8b3HSB\n\n` +
-
-          `**Forces Command**\n` +
-          `FORSCOM Server Link: https://discord.gg/dUCHrZtxgw\n` +
-          `1CAV Server Link: https://discord.gg/gMYjM5qfht\n` +
-          `1ID Server Link: https://discord.gg/UBgk2M6gbN\n` +
-          `82nd Server Link: https://discord.gg/wcp3X2pk83\n` +
-          `1AD Server Link: TBA\n` +
-          `101st Server Link: TBA\n\n` +
-
-          `**Army Special Operations Command**\n` +
-          `ASOC Server Link: https://discord.gg/s32TwtDxP9\n` +
-          `75th Rangers Server Link: https://discord.gg/Pmd9BCzE9h\n` +
-          `Army Special Forces Server Link: https://discord.gg/nwcYU2Jwwu\n` +
-          `160th SOAR Server Link: https://discord.gg/g7MVp7ywzD\n\n` +
-
-          `**Army Public Affairs**\n` +
-          `Army Public Affairs Server: https://discord.gg/8wRx7PUVjW`
-        )
-        .setFooter({ text: "United States Army | Information Section 3" });
-
-      // ───────────────────────────────
-      // 📬 Send All Sections to Info Channel
-      // ───────────────────────────────
-      await infoChannel.send({ embeds: [section1] });
-      await infoChannel.send({ embeds: [section2] });
-      await infoChannel.send({ embeds: [section3] });
-
-      await interaction.editReply({
-        content: `✅ Information embeds posted successfully in <#${INFORMATION_CHANNEL_ID}>.`,
-      });
-    } catch (error) {
-      console.error("❌ Error posting information embeds:", error);
-      await interaction.editReply({
-        content: "❌ Failed to post information embeds. Check console for details.",
-      });
+      await interaction.editReply("✅ Information embeds posted successfully.");
+    } catch (err) {
+      console.error("❌ Error posting information embeds:", err);
+      await interaction.editReply("❌ Failed to post information embeds. Check console for details.");
     }
   },
 };

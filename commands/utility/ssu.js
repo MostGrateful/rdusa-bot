@@ -1,221 +1,119 @@
+// commands/utility/ssu.js
 import {
   SlashCommandBuilder,
   EmbedBuilder,
   PermissionFlagsBits,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-  MessageFlags,
-  AttachmentBuilder,
 } from "discord.js";
 
-const cooldowns = new Map();
+const COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours in ms
 
 export default {
   data: new SlashCommandBuilder()
     .setName("ssu")
-    .setDescription("Announce a Server Start-Up (SSU) event with live status controls."),
+    .setDescription("Announce a server startup (SSU) with a 2-hour cooldown.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addStringOption((opt) =>
+      opt
+        .setName("game")
+        .setDescription("Game/server you are starting (optional).")
+        .setRequired(false)
+    ),
 
-  async execute(interaction) {
-    const message = interaction.options.getString("message") || "";
-    const ssuChannelId = "1388884153470029834"; // ✅ Updated channel
-    const pingRoleId = "1347708867370418267";
-    const commandUserId = interaction.user.id;
-    const now = Date.now();
-    const cooldownDuration = 2 * 60 * 60 * 1000; // 2 hours
+  /**
+   * @param {import("discord.js").ChatInputCommandInteraction} interaction
+   * @param {import("discord.js").Client} client
+   */
+  async execute(interaction, client) {
+    const db = client.db;
+    const game = interaction.options.getString("game") || "RDUSA";
 
-    const ssuChannel = await interaction.client.channels
-      .fetch(ssuChannelId)
-      .catch(() => null);
+    try {
+      // Ephemeral defer (using flags to avoid deprecated 'ephemeral' field)
+      await interaction.deferReply({ flags: 64 });
 
-    if (!ssuChannel)
-      return interaction.reply({
-        content: "❌ SSU channel not found. Please check configuration.",
-        flags: MessageFlags.Ephemeral,
-      });
+      // ───────────────────────────────
+      // ⏰ Global 2-hour cooldown (SQL)
+      // ───────────────────────────────
+      const [rows] = await db.query(
+        "SELECT last_ssu_time FROM bot_config WHERE id = 1"
+      );
 
-    // 🔁 Cooldown check
-    const userCooldown = cooldowns.get(commandUserId);
-    const timeLeft = userCooldown ? cooldownDuration - (now - userCooldown) : 0;
-    const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator);
-
-    if (timeLeft > 0 && !isAdmin) {
-      const remainingMinutes = Math.ceil(timeLeft / 60000);
-      const embed = new EmbedBuilder()
-        .setColor(0xed4245)
-        .setTitle("⏳ On Cooldown")
-        .setDescription(`This command is still on cooldown for **${remainingMinutes} minute(s)**.`)
-        .setFooter({ text: "Please wait before starting another SSU." })
-        .setTimestamp();
-
-      return interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
-    }
-
-    // Set cooldown (resets if admin overrides)
-    cooldowns.set(commandUserId, now);
-
-    // 🟢 Create SSU embed
-    const embed = new EmbedBuilder()
-      .setColor(0x57f287)
-      .setTitle("🟢 Server Start-Up (SSU)")
-      .setDescription(
-        `**Attention <@&${pingRoleId}>!**\n\nThe server is now starting up!\n\n📍 **Location:** [Fort Hood, Texas](https://www.roblox.com/games/134569330405044/Fort-Hood-Texas)\n\n${
-          message ? `💬 **Additional Info:** ${message}` : ""
-        }`
-      )
-      .addFields({ name: "Status", value: "🟢 **Active**" })
-      .setFooter({ text: `Announced by ${interaction.user.tag}` })
-      .setTimestamp();
-
-    // 🎛️ Control buttons
-    const buttons = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`ssu_complete_${commandUserId}`)
-        .setLabel("Completed")
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId(`ssu_cancel_${commandUserId}`)
-        .setLabel("Cancelled")
-        .setStyle(ButtonStyle.Danger)
-    );
-
-    const sentMessage = await ssuChannel.send({
-      content: `<@&${pingRoleId}>`,
-      embeds: [embed],
-      components: [buttons],
-    });
-
-    await interaction.reply({
-      content: "✅ SSU announcement posted successfully with control buttons.",
-      flags: MessageFlags.Ephemeral,
-    });
-
-    // 🎯 Button Collector
-    const collector = sentMessage.createMessageComponentCollector();
-
-    collector.on("collect", async (btnInt) => {
-      const isButtonAdmin = btnInt.member.permissions.has(PermissionFlagsBits.Administrator);
-      const isOwner = btnInt.user.id === commandUserId;
-
-      if (!isOwner && !isButtonAdmin) {
-        return btnInt.reply({
-          content: "❌ You are not authorized to control this SSU announcement.",
-          flags: MessageFlags.Ephemeral,
-        });
+      let lastTime = 0;
+      if (rows.length > 0 && rows[0].last_ssu_time) {
+        lastTime = Number(rows[0].last_ssu_time);
       }
 
-      // ✅ Completed Button
-      if (btnInt.customId === `ssu_complete_${commandUserId}`) {
-        const modal = new ModalBuilder()
-          .setCustomId(`ssu_modal_${commandUserId}`)
-          .setTitle("SSU Completion Details")
-          .addComponents(
-            new ActionRowBuilder().addComponents(
-              new TextInputBuilder()
-                .setCustomId("attendeeCount")
-                .setLabel("Number of Attendees")
-                .setStyle(TextInputStyle.Short)
-                .setPlaceholder("Example: 5")
-                .setRequired(true)
-            ),
-            new ActionRowBuilder().addComponents(
-              new TextInputBuilder()
-                .setCustomId("attendeeNames")
-                .setLabel("Names of Attendees")
-                .setStyle(TextInputStyle.Paragraph)
-                .setPlaceholder("Example: John, Sarah, Alex, Ryan, James")
-                .setRequired(true)
-            )
-          );
+      const now = Date.now();
+      const diff = now - lastTime;
 
-        await btnInt.showModal(modal);
+      if (diff < COOLDOWN_MS) {
+        const remainingMs = COOLDOWN_MS - diff;
+        const remainingMinutes = Math.ceil(remainingMs / (1000 * 60));
+        const hours = Math.floor(remainingMinutes / 60);
+        const minutes = remainingMinutes % 60;
 
-        const modalSubmit = await btnInt
-          .awaitModalSubmit({
-            filter: (i) =>
-              i.customId === `ssu_modal_${commandUserId}` && i.user.id === btnInt.user.id,
-            time: 180000,
-          })
-          .catch(() => null);
-
-        if (!modalSubmit) {
-          return btnInt.followUp({
-            content: "❌ Timed out waiting for SSU completion details.",
-            flags: MessageFlags.Ephemeral,
-          });
+        let timeText = "";
+        if (hours > 0) {
+          timeText += `${hours} hour${hours !== 1 ? "s" : ""}`;
+        }
+        if (minutes > 0) {
+          if (timeText.length > 0) timeText += " ";
+          timeText += `${minutes} minute${minutes !== 1 ? "s" : ""}`;
         }
 
-        const count = modalSubmit.fields.getTextInputValue("attendeeCount");
-        const names = modalSubmit.fields.getTextInputValue("attendeeNames");
+        return interaction.editReply(
+          `🕒 **SSU is on cooldown.**\nYou can use \`/ssu\` again in **${timeText}**.`
+        );
+      }
 
-        await modalSubmit.reply({
-          content:
-            "📸 Please upload a screenshot of the SSU (optional). You have 1 minute to respond.",
-          flags: MessageFlags.Ephemeral,
-        });
+      // Update last_ssu_time in DB (not on cooldown)
+      await db.query(
+        "UPDATE bot_config SET last_ssu_time = ? WHERE id = 1",
+        [now]
+      );
 
-        const collector = ssuChannel.createMessageCollector({
-          filter: (m) => m.author.id === btnInt.user.id && m.attachments.size > 0,
-          time: 60000,
-          max: 1,
-        });
-
-        collector.on("collect", async (msg) => {
-          const image = msg.attachments.first();
-
-          const updatedEmbed = EmbedBuilder.from(embed)
-            .setColor(0x57f287)
-            .spliceFields(0, 1, { name: "Status", value: "🟩 **Completed**" })
-            .addFields(
-              { name: "Attendees", value: `👥 **${count}**`, inline: false },
-              { name: "Names", value: `🧾 ${names}`, inline: false }
-            )
-            .setImage(image.url)
-            .setTimestamp();
-
-          await sentMessage.edit({ embeds: [updatedEmbed], components: [] });
-          await msg.delete().catch(() => null);
-
-          await ssuChannel.send({
-            content: `✅ SSU Completed by <@${btnInt.user.id}>.`,
-          });
-        });
-
-        collector.on("end", async (collected) => {
-          if (collected.size === 0) {
-            const updatedEmbed = EmbedBuilder.from(embed)
-              .setColor(0x57f287)
-              .spliceFields(0, 1, { name: "Status", value: "🟩 **Completed**" })
-              .addFields(
-                { name: "Attendees", value: `👥 **${count}**`, inline: false },
-                { name: "Names", value: `🧾 ${names}`, inline: false }
-              )
-              .setTimestamp();
-
-            await sentMessage.edit({ embeds: [updatedEmbed], components: [] });
-            await ssuChannel.send({
-              content: `✅ SSU Completed (no screenshot uploaded) by <@${btnInt.user.id}>.`,
-            });
+      // ───────────────────────────────
+      // 📣 Build SSU Embed
+      // ───────────────────────────────
+      const ssuEmbed = new EmbedBuilder()
+        .setColor(0x57f287)
+        .setTitle("🟢 Server Startup (SSU)")
+        .setDescription(
+          `A new session has been started for **${game}**.\n\n` +
+          `Please join the game and follow all instructions from hosting staff.`
+        )
+        .addFields(
+          {
+            name: "Started by",
+            value: `${interaction.user.tag} (<@${interaction.user.id}>)`,
+            inline: true,
+          },
+          {
+            name: "Time",
+            value: `<t:${Math.floor(now / 1000)}:F>`,
+            inline: true,
           }
-        });
-      }
+        )
+        .setFooter({ text: "RDUSA | Server Startup" })
+        .setTimestamp();
 
-      // 🔴 Cancelled Button
-      if (btnInt.customId === `ssu_cancel_${commandUserId}`) {
-        const updatedEmbed = EmbedBuilder.from(embed)
-          .setColor(0xed4245)
-          .spliceFields(0, 1, { name: "Status", value: "🔴 **Cancelled**" })
-          .setTimestamp();
+      // Send SSU announcement in the same channel where the command was used
+      await interaction.channel.send({ embeds: [ssuEmbed] });
 
-        await sentMessage.edit({ embeds: [updatedEmbed], components: [] });
-        await btnInt.reply({
-          content: "❌ SSU has been cancelled.",
-          flags: MessageFlags.Ephemeral,
+      // Let the command user know it was sent
+      await interaction.editReply("✅ SSU announced successfully.");
+    } catch (err) {
+      console.error("❌ Error in /ssu:", err);
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: "❌ There was an error while running this command.",
+          flags: 64,
         });
+      } else {
+        await interaction.editReply(
+          "❌ There was an error while running this command."
+        );
       }
-    });
+    }
   },
 };

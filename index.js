@@ -168,6 +168,12 @@ client.on("interactionCreate", async (interaction) => {
     return handleBugModal(interaction);
   }
 
+  // ✅ Edit-Embed Modal (for /editembed)
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("editembed:")) {
+    const { handleEditEmbedModal } = await import("./commands/Management/editembed.js");
+    return handleEditEmbedModal(interaction, client);
+  }
+
   // ❌ Deny Modal Submission (Commission)
   if (interaction.isModalSubmit() && interaction.customId === "commission_deny_modal") {
     await interaction.deferReply({ flags: 64 }).catch(() => null);
@@ -315,31 +321,30 @@ client.on("interactionCreate", async (interaction) => {
   // ─── Slash Commands ───
   if (!interaction.isChatInputCommand()) return;
 
-  // 🚫 Global Blacklist Check
+  // 🚫 Global Blacklist Check (SQL-based)
   try {
-    const BOARD_ID = "iD9Bu3c1";
-    const LIST_NAME = "Blacklisted Users";
-    const listsRes = await fetch(
-      `https://api.trello.com/1/boards/${BOARD_ID}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
-    );
-    const lists = await listsRes.json();
-    const blacklistList = lists.find(
-      (l) => l.name.toLowerCase() === LIST_NAME.toLowerCase()
-    );
-    if (!blacklistList) return;
-    const cardsRes = await fetch(
-      `https://api.trello.com/1/lists/${blacklistList.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
-    );
-    const cards = await cardsRes.json();
-    const isBlacklisted = cards.some((c) => c.name.includes(interaction.user.id));
-    if (isBlacklisted) {
-      return interaction.reply({
-        content: "🚫 You are blacklisted from using this bot.",
-        flags: 64,
-      });
+    const db = client.db;
+    if (db) {
+      const [rows] = await db.query(
+        "SELECT reason FROM bot_blacklist WHERE user_id = ?",
+        [interaction.user.id]
+      );
+
+      if (rows.length > 0) {
+        const reason = rows[0].reason || "No reason provided.";
+        return interaction.reply({
+          content:
+            "🚫 You are blacklisted from using this bot.\n" +
+            `**Reason:** ${reason}`,
+          flags: 64,
+        });
+      }
+    } else {
+      console.warn("⚠️ Global blacklist: client.db is not available.");
     }
   } catch (err) {
-    console.error("⚠️ Blacklist check failed:", err);
+    console.error("⚠️ Global blacklist check failed:", err);
+    // Fail-safe: don't block if DB check fails
   }
 
   // ─── Command Execution ───

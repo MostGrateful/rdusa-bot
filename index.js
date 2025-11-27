@@ -150,6 +150,12 @@ client.once("clientReady", async () => {
 client.on("interactionCreate", async (interaction) => {
   const { TRELLO_API_KEY, TRELLO_TOKEN } = process.env;
 
+  // ✅ QOTD Modal
+  if (interaction.isModalSubmit() && interaction.customId === "qotd_modal") {
+    const { handleQOTDModal } = await import("./commands/utility/qotd.js");
+    return handleQOTDModal(interaction, client);
+  }
+
   // ✅ Suggestion Modal
   if (interaction.isModalSubmit() && interaction.customId === "suggest_modal") {
     const { handleSuggestModal } = await import("./commands/utility/suggest.js");
@@ -160,6 +166,53 @@ client.on("interactionCreate", async (interaction) => {
   if (interaction.isModalSubmit() && interaction.customId === "reportbug_modal") {
     const { handleBugModal } = await import("./commands/utility/reportbug.js");
     return handleBugModal(interaction);
+  }
+
+  // ❌ Deny Modal Submission (Commission)
+  if (interaction.isModalSubmit() && interaction.customId === "commission_deny_modal") {
+    await interaction.deferReply({ flags: 64 }).catch(() => null);
+    const denyReason = interaction.fields.getTextInputValue("deny_reason");
+    const message = interaction.message?.reference
+      ? await interaction.channel.messages.fetch(interaction.message.reference.messageId).catch(() => null)
+      : interaction.message;
+    const embed = message?.embeds?.[0];
+    if (!embed) return;
+
+    const deniedEmbed = new EmbedBuilder(embed.data ?? {})
+      .setColor(0xed4245)
+      .spliceFields(2, 1, {
+        name: "Status",
+        value: `❌ Denied by ${interaction.user.tag}\n**Reason:** ${denyReason}`,
+      });
+
+    await message.edit({ embeds: [deniedEmbed], components: [] }).catch(() => null);
+
+    const cardId = embed?.footer?.text?.match(/CardID:(\w+)/)?.[1];
+    if (cardId) {
+      const trelloComment =
+        `❌ Commission Denied\nBy: ${interaction.user.tag}\n` +
+        `Reason: ${denyReason}\nDate: ${new Date().toUTCString()}`;
+      await fetch(
+        `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: trelloComment }),
+        }
+      );
+    }
+
+    await interaction.editReply({
+      content: `❌ Request denied by ${interaction.user.tag}.`,
+    }).catch(() => null);
+
+    return;
+  }
+
+  // ✅ QOTD Buttons (Submit / Edit / Cancel)
+  if (interaction.isButton() && interaction.customId.startsWith("qotd_")) {
+    const { handleQOTDButtons } = await import("./commands/utility/qotd.js");
+    return handleQOTDButtons(interaction, client);
   }
 
   // ✅ Commission Buttons/Modals
@@ -182,9 +235,10 @@ client.on("interactionCreate", async (interaction) => {
     "1347452417595277404",
   ];
 
-  if (interaction.isButton()) {
+  if (interaction.isButton() && interaction.customId.startsWith("commission_")) {
     const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
     const isAuthorized = member?.roles.cache.some((r) => APPROVED_ROLES.includes(r.id));
+
     if (!isAuthorized) {
       try {
         if (!interaction.replied && !interaction.deferred) {
@@ -210,14 +264,21 @@ client.on("interactionCreate", async (interaction) => {
     // ✅ Approve Button
     if (interaction.customId === "commission_accept") {
       await interaction.deferUpdate().catch(() => null);
-      const approvedEmbed = EmbedBuilder.from(embed)
+
+      const approvedEmbed = new EmbedBuilder(embed.data ?? {})
         .setColor(0x57f287)
-        .spliceFields(2, 1, { name: "Status", value: `✅ Approved by ${interaction.user.tag}` });
+        .spliceFields(2, 1, {
+          name: "Status",
+          value: `✅ Approved by ${interaction.user.tag}`,
+        });
+
       await message.edit({ embeds: [approvedEmbed], components: [] });
 
       const cardId = embed?.footer?.text?.match(/CardID:(\w+)/)?.[1];
       if (cardId) {
-        const trelloComment = `✅ Commission Approved\nBy: ${interaction.user.tag}\nDate: ${new Date().toUTCString()}`;
+        const trelloComment =
+          `✅ Commission Approved\nBy: ${interaction.user.tag}\n` +
+          `Date: ${new Date().toUTCString()}`;
         await fetch(
           `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
           {
@@ -239,50 +300,16 @@ client.on("interactionCreate", async (interaction) => {
       const modal = new ModalBuilder()
         .setCustomId("commission_deny_modal")
         .setTitle("Deny Commission Request");
+
       const reasonInput = new TextInputBuilder()
         .setCustomId("deny_reason")
         .setLabel("Reason for Denial")
         .setStyle(TextInputStyle.Paragraph)
         .setRequired(true);
+
       modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
       return interaction.showModal(modal).catch(() => null);
     }
-  }
-
-  // ❌ Deny Modal Submission
-  if (interaction.isModalSubmit() && interaction.customId === "commission_deny_modal") {
-    await interaction.deferReply({ flags: 64 }).catch(() => null);
-    const denyReason = interaction.fields.getTextInputValue("deny_reason");
-    const message = interaction.message?.reference
-      ? await interaction.channel.messages.fetch(interaction.message.reference.messageId).catch(() => null)
-      : interaction.message;
-    const embed = message?.embeds?.[0];
-    if (!embed) return;
-
-    const deniedEmbed = EmbedBuilder.from(embed)
-      .setColor(0xed4245)
-      .spliceFields(2, 1, {
-        name: "Status",
-        value: `❌ Denied by ${interaction.user.tag}\n**Reason:** ${denyReason}`,
-      });
-    await message.edit({ embeds: [deniedEmbed], components: [] }).catch(() => null);
-
-    const cardId = embed?.footer?.text?.match(/CardID:(\w+)/)?.[1];
-    if (cardId) {
-      const trelloComment = `❌ Commission Denied\nBy: ${interaction.user.tag}\nReason: ${denyReason}\nDate: ${new Date().toUTCString()}`;
-      await fetch(
-        `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: trelloComment }),
-        }
-      );
-    }
-
-    await interaction.editReply({
-      content: `❌ Request denied by ${interaction.user.tag}.`,
-    }).catch(() => null);
   }
 
   // ─── Slash Commands ───

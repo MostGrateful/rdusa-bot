@@ -1,23 +1,18 @@
-import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import {
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+} from "discord.js";
 
-// ───────────────────────────────
-// 📌 FILE PATH SETUP (ESM SAFE)
-// ───────────────────────────────
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const QOTD_CHANNEL = "1389009644063690975";
+const PING_ROLE = "1375628530548998154";
+const THREAD_ROLE = "1347706993204264991";
 
-// ───────────────────────────────
-// ⚙️ CONFIGURATION
-// ───────────────────────────────
-const QOTD_CHANNEL_ID = "1389009644063690975"; // QOTD Channel
-const PING_ROLE_ID = "1375628530548998154";   // Role to ping
-const THREAD_ROLE_ID = "1347706993204264991"; // Role allowed to talk in thread
-const LOG_CHANNEL_ID = "1388955430318768179"; // Log channel
-
-// Roles allowed to use /qotd
 const ALLOWED_ROLES = [
   "1332197345403605123",
   "1369877362224664647",
@@ -28,204 +23,139 @@ const ALLOWED_ROLES = [
   "1369066592423645244",
 ];
 
-// ───────────────────────────────
-// 🕒 DATA DIRECTORY & FILES
-// ───────────────────────────────
-const dataDir = path.join(__dirname, "../../data");
-const cooldownFile = path.join(dataDir, "qotdCooldown.json");
-const counterFile = path.join(dataDir, "qotdCounter.json");
-
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-
-// Cooldown file
-if (!fs.existsSync(cooldownFile)) {
-  fs.writeFileSync(
-    cooldownFile,
-    JSON.stringify({ lastUsed: 0 }, null, 2)
-  );
-}
-
-// Counter file – start at QOTD #77
-if (!fs.existsSync(counterFile)) {
-  fs.writeFileSync(
-    counterFile,
-    JSON.stringify({ count: 77 }, null, 2)
-  );
-}
-
-// ───────────────────────────────
-// 🧩 SLASH COMMAND
-// ───────────────────────────────
 export default {
   data: new SlashCommandBuilder()
     .setName("qotd")
-    .setDescription("Post a Question of the Day to the QOTD channel.")
-    .addStringOption(option =>
-      option
-        .setName("question")
-        .setDescription("The question you'd like to ask.")
-        .setRequired(true)
-    ),
+    .setDescription("Create a Question of the Day with preview"),
 
-  async execute(interaction) {
-    try {
-      // Use flags (ephemeral-style) to match your other commands
-      await interaction.deferReply({ flags: 64 });
+  async execute(interaction, client) {
+    const member = await interaction.guild.members.fetch(interaction.user.id);
 
-      // 🔒 Permission Check
-      const member = await interaction.guild.members.fetch(interaction.user.id);
-      const allowed = member.roles.cache.some(r =>
-        ALLOWED_ROLES.includes(r.id)
-      );
-
-      if (!allowed) {
-        return interaction.editReply(
-          "🚫 You do not have permission to use this command."
-        );
-      }
-
-      // ⏰ Cooldown Check (24 hours)
-      const cooldownData = JSON.parse(fs.readFileSync(cooldownFile, "utf8"));
-      const now = Date.now();
-      const diff = now - cooldownData.lastUsed;
-
-      if (diff < 24 * 60 * 60 * 1000) {
-        const remainingHours = 24 - diff / (1000 * 60 * 60);
-        return interaction.editReply(
-          `🕓 This command can only be used once every 24 hours.\nPlease wait **${remainingHours.toFixed(
-            1
-          )}** more hour(s).`
-        );
-      }
-
-      // ✅ Passed cooldown – update timestamp
-      cooldownData.lastUsed = now;
-      fs.writeFileSync(
-        cooldownFile,
-        JSON.stringify(cooldownData, null, 2)
-      );
-
-      // 🔢 Load QOTD counter
-      const counterData = JSON.parse(fs.readFileSync(counterFile, "utf8"));
-      const qotdNumber = counterData.count;
-
-      const question = interaction.options.getString("question");
-
-      // 📨 Send QOTD Embed
-      const qotdChannel = await interaction.client.channels
-        .fetch(QOTD_CHANNEL_ID)
-        .catch(() => null);
-
-      if (!qotdChannel || !qotdChannel.isTextBased()) {
-        return interaction.editReply("❌ Could not find the QOTD channel.");
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(0x2596be)
-        .setTitle(`Question of the Day — QOTD #${qotdNumber}`)
-        .setDescription(question)
-        .setFooter({ text: `Sent by ${interaction.user.tag}` })
-        .setTimestamp();
-
-      const qotdMessage = await qotdChannel.send({
-        content: `<@&${PING_ROLE_ID}>`,
-        embeds: [embed],
-      });
-
-      // 🧵 Create Discussion Thread with updated name
-      const sanitizedQuestion = question.substring(0, 70); // keep thread name under limit
-      const thread = await qotdMessage.startThread({
-        name: `AOTD - QOTD #${qotdNumber} - ${sanitizedQuestion}`,
-        autoArchiveDuration: 1440,
-        reason: "AOTD Discussion Thread",
-      });
-
-      // Now that QOTD posted successfully, increment counter for next time
-      counterData.count = qotdNumber + 1;
-      fs.writeFileSync(
-        counterFile,
-        JSON.stringify(counterData, null, 2)
-      );
-
-      // Wait briefly to ensure thread permissions initialize
-      await new Promise(r => setTimeout(r, 1500));
-
-      try {
-        const everyone = interaction.guild.roles.everyone;
-        const discussionRole =
-          interaction.guild.roles.cache.get(THREAD_ROLE_ID);
-
-        // Restrict @everyone from sending messages
-        if (everyone) {
-          await thread.permissionOverwrites.edit(everyone, {
-            SendMessages: false,
-          });
-        }
-
-        // Allow discussion role to see + send
-        if (discussionRole) {
-          await thread.permissionOverwrites.edit(discussionRole, {
-            SendMessages: true,
-            ViewChannel: true,
-          });
-        }
-      } catch (permErr) {
-        console.warn(
-          "⚠️ Failed to set thread permissions:",
-          permErr?.message ?? permErr
-        );
-      }
-
-      // 🗣️ Thread welcome message
-      await thread.send(
-        `💬 Welcome to today's QOTD discussion (QOTD #${qotdNumber})!`
-      );
-
-      // ✅ Confirmation
-      await interaction.editReply(
-        `✅ QOTD #${qotdNumber} posted successfully in <#${QOTD_CHANNEL_ID}>.\nA discussion thread has been created.`
-      );
-
-      // 🧾 Log Embed
-      const logChannel = await interaction.client.channels
-        .fetch(LOG_CHANNEL_ID)
-        .catch(() => null);
-
-      if (logChannel && logChannel.isTextBased()) {
-        const logEmbed = new EmbedBuilder()
-          .setColor(0x5865f2)
-          .setTitle(`📝 QOTD #${qotdNumber} Posted`)
-          .addFields(
-            {
-              name: "Author",
-              value: `${interaction.user.tag} (<@${interaction.user.id}>)`,
-              inline: false,
-            },
-            { name: "Question", value: question, inline: false },
-            { name: "Channel", value: `<#${QOTD_CHANNEL_ID}>`, inline: true },
-            {
-              name: "Message Link",
-              value: `[View QOTD](https://discord.com/channels/${interaction.guild.id}/${qotdChannel.id}/${qotdMessage.id})`,
-              inline: false,
-            }
-          )
-          .setFooter({ text: `User ID: ${interaction.user.id}` })
-          .setTimestamp();
-
-        await logChannel.send({ embeds: [logEmbed] });
-      }
-    } catch (err) {
-      console.error("❌ Error executing /qotd:", err);
-      if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply({
-          content: "❌ There was an error while executing this command.",
-          flags: 64,
-        });
-      } else {
-        await interaction.editReply(
-          "❌ An error occurred while running this command."
-        );
-      }
+    if (!member.roles.cache.some(r => ALLOWED_ROLES.includes(r.id))) {
+      return interaction.reply({ content: "🚫 You cannot use this command.", flags: 64 });
     }
+
+    // Show modal
+    const modal = new ModalBuilder()
+      .setCustomId("qotd_modal")
+      .setTitle("Create QOTD");
+
+    const qInput = new TextInputBuilder()
+      .setCustomId("qotd_question")
+      .setLabel("Enter your Question of the Day")
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(qInput));
+
+    await interaction.showModal(modal);
   },
 };
+
+// ─────────────────────────────────────────────
+// 📌 Modal Submit Handler
+// ─────────────────────────────────────────────
+export async function handleQOTDModal(interaction, client) {
+  if (interaction.customId !== "qotd_modal") return;
+
+  const db = client.db;
+  const question = interaction.fields.getTextInputValue("qotd_question");
+  const user = interaction.user;
+
+  await interaction.deferReply({ flags: 64 });
+
+  // Fetch SQL values
+  const [rows] = await db.query("SELECT qotd_counter, last_qotd_time FROM bot_config WHERE id = 1");
+  const counter = rows[0].qotd_counter;
+  const lastTime = rows[0].last_qotd_time;
+
+  // Cooldown check: 24 hours
+  const now = Date.now();
+  if (now - lastTime < 86400000) {
+    const hrsLeft = ((86400000 - (now - lastTime)) / 3600000).toFixed(1);
+    return interaction.editReply(`🕒 QOTD can be posted again in **${hrsLeft} hours**.`);
+  }
+
+  // Build preview embed
+  const previewEmbed = new EmbedBuilder()
+    .setColor(0x2596be)
+    .setTitle(`QOTD #${counter + 1} — Preview`)
+    .setDescription(question)
+    .setFooter({ text: `Requested by ${user.tag}` })
+    .setTimestamp();
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId("qotd_submit").setLabel("Submit").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId("qotd_edit").setLabel("Edit").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId("qotd_cancel").setLabel("Cancel").setStyle(ButtonStyle.Danger),
+  );
+
+  // Store in memory for this interaction
+  client.qotdDraft = { question };
+
+  await interaction.editReply({ embeds: [previewEmbed], components: [buttons] });
+}
+
+// ─────────────────────────────────────────────
+// 📌 Button Handler
+// ─────────────────────────────────────────────
+export async function handleQOTDButtons(interaction, client) {
+  if (!["qotd_submit", "qotd_edit", "qotd_cancel"].includes(interaction.customId)) return;
+
+  const db = client.db;
+  const draft = client.qotdDraft;
+  if (!draft) return interaction.reply({ content: "❌ No draft found.", flags: 64 });
+
+  if (interaction.customId === "qotd_cancel") {
+    client.qotdDraft = null;
+    return interaction.reply({ content: "❌ QOTD creation cancelled.", flags: 64 });
+  }
+
+  if (interaction.customId === "qotd_edit") {
+    const modal = new ModalBuilder().setCustomId("qotd_modal").setTitle("Edit QOTD");
+    const qInput = new TextInputBuilder()
+      .setCustomId("qotd_question")
+      .setLabel("Edit Question")
+      .setStyle(TextInputStyle.Paragraph)
+      .setValue(draft.question);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(qInput));
+    return interaction.showModal(modal);
+  }
+
+  if (interaction.customId === "qotd_submit") {
+    await interaction.deferReply({ flags: 64 });
+
+    // Get SQL counter
+    const [rows] = await db.query("SELECT qotd_counter FROM bot_config WHERE id = 1");
+    const newCounter = rows[0].qotd_counter + 1;
+
+    // Update SQL
+    await db.query("UPDATE bot_config SET qotd_counter = ?, last_qotd_time = ? WHERE id = 1", [
+      newCounter,
+      Date.now(),
+    ]);
+
+    const qotdEmbed = new EmbedBuilder()
+      .setColor(0x2596be)
+      .setTitle(`QOTD #${newCounter}`)
+      .setDescription(draft.question)
+      .setFooter({ text: `Sent by ${interaction.user.tag}` })
+      .setTimestamp();
+
+    const channel = await client.channels.fetch(QOTD_CHANNEL);
+    const msg = await channel.send({ content: `<@&${PING_ROLE}>`, embeds: [qotdEmbed] });
+
+    // Thread
+    const thread = await msg.startThread({
+      name: `AOTD - ${draft.question.substring(0, 40)}`,
+      autoArchiveDuration: 1440,
+    });
+
+    await thread.send(`💬 Discuss the QOTD here! Only <@&${THREAD_ROLE}> can chat.`);
+
+    client.qotdDraft = null;
+
+    return interaction.editReply("✅ QOTD posted successfully!");
+  }
+}

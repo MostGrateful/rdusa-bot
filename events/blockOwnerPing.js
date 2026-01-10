@@ -1,18 +1,18 @@
 // events/blockOwnerPing.js
 import { EmbedBuilder } from "discord.js";
 
-// Optional: roles that are allowed to ping protected users
-const WHITELISTED_ROLE_IDS = [
-  // "222222222222222222", // Example: High Command role
-  // "333333333333333333", // Example: Developer role
-];
-
+/**
+ * Anti-ping system:
+ * - Uses SQL table: anti_ping_protected (id, user_id, enabled)
+ * - If a user with enabled=1 is mentioned, the message is deleted
+ *   unless the author is whitelisted (optional table anti_ping_whitelist)
+ */
 export default {
   name: "messageCreate",
 
   /**
-   * @param {import("discord.js").Message} message
-   * @param {import("discord.js").Client} client
+   * @param {import('discord.js').Message} message
+   * @param {import('discord.js').Client} client
    */
   async execute(message, client) {
     try {
@@ -21,109 +21,82 @@ export default {
 
       const db = client.db;
       if (!db) {
-        console.warn("⚠️ Anti-ping: client.db is not available.");
+        console.warn("⚠️ Anti-ping: client.db is not available, skipping.");
         return;
       }
 
-      // No mentions → nothing to do
-      if (message.mentions.users.size === 0) return;
+      // No mentions? Nothing to do.
+      if (!message.mentions.users.size) return;
 
-      // ───────────────────────────────
-      // 🔁 Global Anti-Ping Toggle (anti_ping_config)
-      // ───────────────────────────────
-      try {
-        const [cfgRows] = await db.query(
-          "SELECT enabled FROM anti_ping_config WHERE id = 1"
-        );
-
-        // If row missing or disabled → do nothing
-        if (!cfgRows.length || !cfgRows[0].enabled) {
-          return;
-        }
-      } catch (err) {
-        console.warn("⚠️ Anti-ping: failed to read anti_ping_config, skipping.", err.message);
-        return; // Fail-safe: don’t block pings if config read fails
-      }
-
-      // ───────────────────────────────
-      // 🔍 Determine which mentions are protected
-      // ───────────────────────────────
-      const mentionedIds = [...message.mentions.users.keys()];
-      const placeholders = mentionedIds.map(() => "?").join(",");
-
+      // 1) Get all protected users + their enabled flag
       const [protectedRows] = await db.query(
-        `
-          SELECT user_id
-          FROM anti_ping_protected
-          WHERE enabled = 1
-            AND user_id IN (${placeholders})
-        `,
-        mentionedIds
+        "SELECT user_id, enabled FROM anti_ping_protected"
       );
 
-      // If none of the mentioned users are protected → exit
       if (!protectedRows.length) return;
 
-      const protectedIds = protectedRows.map((r) => String(r.user_id));
+      // Enabled protected IDs as strings
+      const enabledProtectedIds = protectedRows
+        .filter((row) => row.enabled)
+        .map((row) => String(row.user_id));
 
-      // ───────────────────────────────
-      // ✅ Whitelist Check (Users + Roles)
-      // ───────────────────────────────
-      let isWhitelisted = false;
+      if (!enabledProtectedIds.length) return;
 
-      // Check whitelisted users (anti_ping_whitelist)
+      // 2) Optional: user whitelist (anti_ping_whitelist)
+      let whitelistedUserIds = [];
       try {
         const [whitelistRows] = await db.query(
-          "SELECT user_id FROM anti_ping_whitelist WHERE user_id = ?",
-          [message.author.id]
+          "SELECT user_id FROM anti_ping_whitelist"
         );
-        if (whitelistRows.length > 0) {
-          isWhitelisted = true;
-        }
-      } catch (err) {
-        console.warn("⚠️ Anti-ping: failed to read anti_ping_whitelist:", err.message);
+        whitelistedUserIds = whitelistRows.map((r) => String(r.user_id));
+      } catch {
+        // If table doesn't exist, silently ignore; anti-ping still works
       }
 
-      // Check whitelisted roles
-      const member = await message.guild.members
-        .fetch(message.author.id)
-        .catch(() => null);
+      const authorId = message.author.id;
 
-      if (member && WHITELISTED_ROLE_IDS.length > 0) {
-        const hasWhitelistedRole = member.roles.cache.some((role) =>
-          WHITELISTED_ROLE_IDS.includes(role.id)
-        );
-        if (hasWhitelistedRole) {
-          isWhitelisted = true;
-        }
-      }
+      // If author is whitelisted, allow pings
+      if (whitelistedUserIds.includes(authorId)) return;
 
-      // If the author is whitelisted → allow ping, do nothing
-      if (isWhitelisted) return;
+      // 3) Check if any mentioned user is protected + enabled
+      const mentionedProtected = [...message.mentions.users.values()].find(
+        (user) => enabledProtectedIds.includes(user.id)
+      );
 
-      // ───────────────────────────────
-      // 🚫 Block ping + warn user
-      // ───────────────────────────────
+      if (!mentionedProtected) return;
+
+      // If they ping themselves, allow it
+      if (mentionedProtected.id === authorId) return;
+
+      // 4) Delete message + warn
       await message.delete().catch(() => null);
-
-      const firstProtected = protectedIds[0];
 
       const warnEmbed = new EmbedBuilder()
         .setColor(0xed4245)
         .setTitle("⚠️ Do Not Ping This User")
         .setDescription(
-          `Hey <@${message.author.id}>, please do **not** ping this protected user.\n` +
-          `Protected User: <@${firstProtected}>\n\n` +
-          `If you need assistance, please use the proper chain of command or support channels instead.`
+          `Hey <@${authorId}>, please do **not** ping <@${mentionedProtected.id}>.\n` +
+            `Their anti-ping protection is currently **enabled**.\n\n` +
+            `If you need assistance, please use the appropriate support or chain-of-command channels instead.`
         )
         .setFooter({ text: "RDUSA Bot • Anti-Ping System" })
         .setTimestamp();
 
-      await message.channel
-        .send({ content: `<@${message.author.id}>`, embeds: [warnEmbed] })
+      const warningMsg = await message.channel
+        .send({
+          content: `<@${authorId}>`,
+          embeds: [warnEmbed],
+        })
         .catch(() => null);
+
+      // Auto-delete the warning after 7 seconds (optional)
+      if (warningMsg) {
+        setTimeout(() => {
+          warningMsg.delete().catch(() => null);
+        }, 7000);
+      }
     } catch (err) {
-      console.error("❌ Error in blockOwnerPing messageCreate handler:", err);
+      console.error("❌ Error in blockOwnerPing (anti-ping):", err);
     }
   },
 };

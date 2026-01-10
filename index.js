@@ -58,6 +58,27 @@ try {
   });
   client.db = db;
   console.log("🗄️ MySQL Database connected successfully.");
+
+  // ✅ Ensure table exists for persistent Discord requests
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS discord_requests (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      type VARCHAR(64) NOT NULL,
+      guild_id VARCHAR(32) NOT NULL,
+      channel_id VARCHAR(32) NOT NULL,
+      message_id VARCHAR(32) NOT NULL,
+      requester_id VARCHAR(32) NOT NULL,
+      target_id VARCHAR(32) NOT NULL,
+      payload_json JSON NOT NULL,
+      status ENUM('pending','approved','denied') DEFAULT 'pending',
+      decided_by VARCHAR(32) DEFAULT NULL,
+      decided_reason TEXT DEFAULT NULL,
+      decided_at DATETIME DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uniq_message (message_id)
+    );
+  `);
+  console.log("🧾 discord_requests table ensured.");
 } catch (err) {
   console.error("❌ Failed to connect to MySQL:", err);
 }
@@ -106,14 +127,42 @@ async function loadEvents() {
 await loadEvents();
 
 // ───────────────────────────────
-// 🟢 Ready Event
+// 🟢 Ready Event (reads status from SQL)
 // ───────────────────────────────
 client.once("clientReady", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
+  let activityName = "RDUSA";
+  let activityType = 3;
+  let status = "online";
+
+  const db = client.db;
+  if (db) {
+    try {
+      const [rows] = await db.query(
+        "SELECT bot_status_text, bot_status_type, bot_status_state FROM bot_config WHERE id = 1",
+      );
+
+      if (rows.length > 0) {
+        const cfg = rows[0];
+        if (cfg.bot_status_text) activityName = cfg.bot_status_text;
+        if (typeof cfg.bot_status_type === "number") activityType = cfg.bot_status_type;
+        if (cfg.bot_status_state) status = cfg.bot_status_state;
+
+        console.log(
+          `🎛 Loaded presence from DB: text="${activityName}", type=${activityType}, status="${status}"`,
+        );
+      } else {
+        console.warn("⚠️ bot_config row id=1 not found, using default presence.");
+      }
+    } catch (err) {
+      console.error("❌ Failed to load bot presence from DB, using default:", err);
+    }
+  }
+
   client.user.setPresence({
-    activities: [{ name: "RDUSA", type: 3 }],
-    status: "online",
+    activities: [{ name: activityName, type: activityType }],
+    status,
   });
 
   const devLogChannel = await client.channels
@@ -127,7 +176,7 @@ client.once("clientReady", async () => {
       .setDescription(`**${client.user.tag}** is now online and operational.`)
       .addFields(
         { name: "Startup Time", value: `<t:${Math.floor(Date.now() / 1000)}:F>` },
-        { name: "Servers Connected", value: `${client.guilds.cache.size}` }
+        { name: "Servers Connected", value: `${client.guilds.cache.size}` },
       )
       .setFooter({ text: "RDUSA Bot Logging System" })
       .setTimestamp();
@@ -138,7 +187,6 @@ client.once("clientReady", async () => {
   setInterval(() => checkExpiredBlacklists(client), 1000 * 60 * 60);
   await checkExpiredBlacklists(client);
 
-  // 🪖 Daily Chain of Command Updater
   console.log("🕓 Scheduling daily Chain of Command updates...");
   setInterval(() => updateChainOfCommand(client), 1000 * 60 * 60 * 24);
   await updateChainOfCommand(client);
@@ -148,7 +196,7 @@ client.once("clientReady", async () => {
 // 🎛 Global Interaction Handler
 // ───────────────────────────────
 client.on("interactionCreate", async (interaction) => {
-  const { TRELLO_API_KEY, TRELLO_TOKEN } = process.env;
+  const db = client.db;
 
   // ✅ QOTD Modal
   if (interaction.isModalSubmit() && interaction.customId === "qotd_modal") {
@@ -168,60 +216,147 @@ client.on("interactionCreate", async (interaction) => {
     return handleBugModal(interaction);
   }
 
-  // ✅ Edit-Embed Modal (for /editembed)
-  if (interaction.isModalSubmit() && interaction.customId.startsWith("editembed:")) {
-    const { handleEditEmbedModal } = await import("./commands/Management/editembed.js");
-    return handleEditEmbedModal(interaction, client);
-  }
+  // ✅ Request Background Check Role Modal
+  if (
+    interaction.isModalSubmit() &&
+    interaction.customId === "requestBackgroundCheckRoleModal"
+  ) {
+    const BACKGROUND_MANAGER_CHANNEL = "1439479062572699739";
+    const NORMAL_LOG_CHANNEL = "1388886528968622080";
+    const DEV_LOG_CHANNEL = "1388955430318768179";
 
-  // ❌ Deny Modal Submission (Commission)
-  if (interaction.isModalSubmit() && interaction.customId === "commission_deny_modal") {
-    await interaction.deferReply({ flags: 64 }).catch(() => null);
-    const denyReason = interaction.fields.getTextInputValue("deny_reason");
-    const message = interaction.message?.reference
-      ? await interaction.channel.messages.fetch(interaction.message.reference.messageId).catch(() => null)
-      : interaction.message;
-    const embed = message?.embeds?.[0];
-    if (!embed) return;
+    const username = interaction.fields.getTextInputValue("bg_username");
+    const armyRank = interaction.fields.getTextInputValue("bg_armyrank");
+    const division = interaction.fields.getTextInputValue("bg_division");
+    const divisionRank = interaction.fields.getTextInputValue("bg_divisionrank");
+    const reason = interaction.fields.getTextInputValue("bg_reason");
 
-    const deniedEmbed = new EmbedBuilder(embed.data ?? {})
-      .setColor(0xed4245)
-      .spliceFields(2, 1, {
-        name: "Status",
-        value: `❌ Denied by ${interaction.user.tag}\n**Reason:** ${denyReason}`,
-      });
-
-    await message.edit({ embeds: [deniedEmbed], components: [] }).catch(() => null);
-
-    const cardId = embed?.footer?.text?.match(/CardID:(\w+)/)?.[1];
-    if (cardId) {
-      const trelloComment =
-        `❌ Commission Denied\nBy: ${interaction.user.tag}\n` +
-        `Reason: ${denyReason}\nDate: ${new Date().toUTCString()}`;
-      await fetch(
-        `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+    const embed = new EmbedBuilder()
+      .setTitle("📥 Request Background Check Role")
+      .setColor(0x2b6cb0)
+      .addFields(
+        { name: "Username", value: username, inline: true },
+        { name: "Army Rank", value: armyRank, inline: true },
+        { name: "Division", value: division, inline: true },
+        { name: "Division Rank", value: divisionRank, inline: true },
         {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: trelloComment }),
-        }
-      );
+          name: "Reason & Division Benefit",
+          value: reason || "No reason provided.",
+          inline: false,
+        },
+        { name: "Requested By", value: `<@${interaction.user.id}>`, inline: false },
+      )
+      .setTimestamp();
+
+    try {
+      const bgChannel = await interaction.client.channels.fetch(BACKGROUND_MANAGER_CHANNEL);
+      if (bgChannel) {
+        await bgChannel.send({
+          content:
+            "<@238058962711216130> A new **Background Check Role** request has been submitted.",
+          embeds: [embed],
+        });
+      }
+    } catch (err) {
+      console.error("Error sending to Background Manager channel:", err);
     }
 
-    await interaction.editReply({
-      content: `❌ Request denied by ${interaction.user.tag}.`,
-    }).catch(() => null);
+    try {
+      const logChannel = await interaction.client.channels.fetch(NORMAL_LOG_CHANNEL);
+      if (logChannel) {
+        await logChannel.send({
+          content: `Background Check Role request submitted by <@${interaction.user.id}>`,
+          embeds: [embed],
+        });
+      }
+    } catch (err) {
+      console.error("Error sending to normal log channel:", err);
+    }
+
+    try {
+      const devChannel = await interaction.client.channels.fetch(DEV_LOG_CHANNEL);
+      if (devChannel) {
+        await devChannel.send({
+          content: `[DEV LOG] /requestbackgroundcheckrole used by ${interaction.user.tag} (${interaction.user.id})`,
+          embeds: [embed],
+        });
+      }
+    } catch (err) {
+      console.error("Error sending to developer log channel:", err);
+    }
+
+    await interaction.reply({
+      content: "✅ Your **Background Check Role** request has been submitted.",
+      flags: 64,
+    });
 
     return;
   }
 
-  // ✅ QOTD Buttons (Submit / Edit / Cancel)
-  if (interaction.isButton() && interaction.customId.startsWith("qotd_")) {
-    const { handleQOTDButtons } = await import("./commands/utility/qotd.js");
-    return handleQOTDButtons(interaction, client);
+  // ✅ Edit-Embed Modal (FIXED ROUTE)
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("editembed_modal:")) {
+    const { handleEditEmbedModal } = await import("./commands/utility/editembed.js");
+    return handleEditEmbedModal(interaction, client);
   }
 
-  // ✅ Commission Buttons/Modals
+  // ─────────────────────────────────────────────
+  // ✅ PERSISTENT COMMISSION DENY MODAL (Discord-only)
+  // customId format: commission_deny_modal:<messageId>
+  // ─────────────────────────────────────────────
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("commission_deny_modal:")) {
+    if (!db)
+      return interaction.reply({ content: "❌ Database not available.", flags: 64 }).catch(() => null);
+
+    const messageId = interaction.customId.split(":")[1];
+    const denyReason = interaction.fields.getTextInputValue("deny_reason");
+
+    const [rows] = await db.query(
+      "SELECT * FROM discord_requests WHERE type='commission' AND message_id=? LIMIT 1",
+      [messageId],
+    );
+
+    if (!rows.length) {
+      return interaction.reply({ content: "❌ Request not found in database.", flags: 64 }).catch(() => null);
+    }
+
+    const req = rows[0];
+    if (req.status !== "pending") {
+      return interaction.reply({ content: "⚠️ This request was already processed.", flags: 64 }).catch(() => null);
+    }
+
+    await db.query(
+      "UPDATE discord_requests SET status='denied', decided_by=?, decided_reason=?, decided_at=NOW() WHERE message_id=? AND status='pending'",
+      [interaction.user.id, denyReason, messageId],
+    );
+
+    const ch = await client.channels.fetch(req.channel_id).catch(() => null);
+    const msg = ch ? await ch.messages.fetch(req.message_id).catch(() => null) : null;
+
+    if (msg?.embeds?.[0]) {
+      const deniedEmbed = EmbedBuilder.from(msg.embeds[0])
+        .setColor(0xed4245)
+        .setFooter({ text: `Denied • ${new Date().toLocaleString()}` });
+
+      const fields = deniedEmbed.data.fields ?? [];
+      const statusIndex = fields.findIndex((f) => f.name?.toLowerCase() === "status");
+      const statusValue = `❌ Denied by ${interaction.user.tag}\n**Reason:** ${denyReason}`;
+
+      if (statusIndex !== -1) {
+        deniedEmbed.spliceFields(statusIndex, 1, { name: "Status", value: statusValue, inline: false });
+      } else {
+        deniedEmbed.addFields({ name: "Status", value: statusValue, inline: false });
+      }
+
+      await msg.edit({ embeds: [deniedEmbed], components: [] }).catch(() => null);
+    }
+
+    return interaction.reply({ content: "❌ Request denied and buttons removed.", flags: 64 }).catch(() => null);
+  }
+
+  // ─────────────────────────────────────────────
+  // ✅ PERSISTENT COMMISSION BUTTONS (Discord-only)
+  // customId format: commission_accept:<messageId> OR commission_deny:<messageId>
+  // ─────────────────────────────────────────────
   const APPROVED_ROLES = [
     "1332198216560541696",
     "1378460548844486776",
@@ -242,69 +377,73 @@ client.on("interactionCreate", async (interaction) => {
   ];
 
   if (interaction.isButton() && interaction.customId.startsWith("commission_")) {
-    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
-    const isAuthorized = member?.roles.cache.some((r) => APPROVED_ROLES.includes(r.id));
+    if (!db) {
+      return interaction.reply({ content: "❌ Database not available.", flags: 64 }).catch(() => null);
+    }
+
+    const member = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+    const isAuthorized = member?.roles?.cache?.some((r) => APPROVED_ROLES.includes(r.id));
 
     if (!isAuthorized) {
-      try {
-        if (!interaction.replied && !interaction.deferred) {
-          await interaction.reply({
-            content: "🚫 You are not authorized to manage this request.",
-            flags: 64,
-          });
-        } else {
-          await interaction.followUp({
-            content: "🚫 You are not authorized to manage this request.",
-            flags: 64,
-          });
-        }
-      } catch (err) {
-        console.warn("⚠️ Safe interaction catch:", err.message);
-      }
+      return interaction.reply({
+        content: "🚫 You are not authorized to manage this request.",
+        flags: 64,
+      }).catch(() => null);
+    }
+
+    const [action, messageId] = interaction.customId.split(":");
+    if (!messageId) {
+      return interaction.reply({ content: "❌ Invalid button payload.", flags: 64 }).catch(() => null);
+    }
+
+    const [rows] = await db.query(
+      "SELECT * FROM discord_requests WHERE type='commission' AND message_id=? LIMIT 1",
+      [messageId],
+    );
+
+    if (!rows.length) {
+      return interaction.reply({ content: "❌ Request not found in database.", flags: 64 }).catch(() => null);
+    }
+
+    const req = rows[0];
+
+    if (req.status !== "pending") {
+      await interaction.deferUpdate().catch(() => null);
+      await interaction.message.edit({ components: [] }).catch(() => null);
       return;
     }
 
-    const message = interaction.message;
-    const embed = message.embeds[0];
-
-    // ✅ Approve Button
-    if (interaction.customId === "commission_accept") {
+    if (action === "commission_accept") {
       await interaction.deferUpdate().catch(() => null);
 
-      const approvedEmbed = new EmbedBuilder(embed.data ?? {})
-        .setColor(0x57f287)
-        .spliceFields(2, 1, {
-          name: "Status",
-          value: `✅ Approved by ${interaction.user.tag}`,
-        });
+      await db.query(
+        "UPDATE discord_requests SET status='approved', decided_by=?, decided_at=NOW() WHERE message_id=? AND status='pending'",
+        [interaction.user.id, messageId],
+      );
 
-      await message.edit({ embeds: [approvedEmbed], components: [] });
+      const approvedEmbed = interaction.message?.embeds?.[0]
+        ? EmbedBuilder.from(interaction.message.embeds[0]).setColor(0x57f287)
+        : new EmbedBuilder().setColor(0x57f287);
 
-      const cardId = embed?.footer?.text?.match(/CardID:(\w+)/)?.[1];
-      if (cardId) {
-        const trelloComment =
-          `✅ Commission Approved\nBy: ${interaction.user.tag}\n` +
-          `Date: ${new Date().toUTCString()}`;
-        await fetch(
-          `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: trelloComment }),
-          }
-        );
+      const fields = approvedEmbed.data.fields ?? [];
+      const statusIndex = fields.findIndex((f) => f.name?.toLowerCase() === "status");
+      const statusValue = `✅ Approved by ${interaction.user.tag}`;
+
+      if (statusIndex !== -1) {
+        approvedEmbed.spliceFields(statusIndex, 1, { name: "Status", value: statusValue, inline: false });
+      } else {
+        approvedEmbed.addFields({ name: "Status", value: statusValue, inline: false });
       }
 
-      return interaction.followUp({
-        content: `✅ Request approved by ${interaction.user.tag}.`,
-        flags: 64,
-      });
+      approvedEmbed.setFooter({ text: `Approved • ${new Date().toLocaleString()}` });
+
+      await interaction.message.edit({ embeds: [approvedEmbed], components: [] }).catch(() => null);
+      return;
     }
 
-    // ❌ Deny Button
-    if (interaction.customId === "commission_deny") {
+    if (action === "commission_deny") {
       const modal = new ModalBuilder()
-        .setCustomId("commission_deny_modal")
+        .setCustomId(`commission_deny_modal:${messageId}`)
         .setTitle("Deny Commission Request");
 
       const reasonInput = new TextInputBuilder()
@@ -321,35 +460,85 @@ client.on("interactionCreate", async (interaction) => {
   // ─── Slash Commands ───
   if (!interaction.isChatInputCommand()) return;
 
+  // 🛠️ Maintenance mode + override logic
+  const OWNER_ID = "238058962711216130";
+  const MAINT_OVERRIDE_ROLE_ID = "1442276596558987446";
+
+  const member =
+    interaction.member ??
+    (interaction.guild
+      ? await interaction.guild.members.fetch(interaction.user.id).catch(() => null)
+      : null);
+
+  const isOwner = interaction.user.id === OWNER_ID;
+  const hasOverrideRole = member?.roles?.cache?.has(MAINT_OVERRIDE_ROLE_ID) ?? false;
+
+  const isMaintenanceBypass = isOwner || hasOverrideRole;
+  interaction.isMaintenanceBypass = isMaintenanceBypass;
+
+  let maintenanceOn = false;
+  try {
+    if (db) {
+      const [settingsRows] = await db.query("SELECT maintenance FROM bot_settings LIMIT 1;");
+      const maintenanceStatus = settingsRows[0]?.maintenance || "off";
+      maintenanceOn = maintenanceStatus === "on";
+    }
+  } catch (err) {
+    console.error("⚠️ Maintenance mode check failed:", err);
+  }
+
+  if (maintenanceOn && !isMaintenanceBypass) {
+    return interaction.reply({
+      content: "🛠️ The bot is currently in **maintenance mode**.\nPlease try again later.",
+      flags: 64,
+    });
+  }
+
   // 🚫 Global Blacklist Check (SQL-based)
   try {
-    const db = client.db;
     if (db) {
-      const [rows] = await db.query(
-        "SELECT reason FROM bot_blacklist WHERE user_id = ?",
-        [interaction.user.id]
-      );
+      const [rows] = await db.query("SELECT reason FROM bot_blacklist WHERE user_id = ?", [
+        interaction.user.id,
+      ]);
 
       if (rows.length > 0) {
         const reason = rows[0].reason || "No reason provided.";
         return interaction.reply({
-          content:
-            "🚫 You are blacklisted from using this bot.\n" +
-            `**Reason:** ${reason}`,
+          content: "🚫 You are blacklisted from using this bot.\n" + `**Reason:** ${reason}`,
           flags: 64,
         });
       }
-    } else {
-      console.warn("⚠️ Global blacklist: client.db is not available.");
     }
   } catch (err) {
     console.error("⚠️ Global blacklist check failed:", err);
-    // Fail-safe: don't block if DB check fails
   }
 
-  // ─── Command Execution ───
   const command = client.commands.get(interaction.commandName);
   if (!command) return;
+
+  // 🧱 Bot-owner-only commands that the override role must NOT use
+  const OWNER_ONLY_COMMANDS = [
+    "blacklist",
+    "eval",
+    "maintenance",
+    "owner",
+    "reload",
+    "setstatus",
+    "shutdown",
+  ];
+
+  if (
+    maintenanceOn &&
+    hasOverrideRole &&
+    !isOwner &&
+    OWNER_ONLY_COMMANDS.includes(interaction.commandName)
+  ) {
+    return interaction.reply({
+      content:
+        "🚫 This command is restricted to the bot owner, even while maintenance mode is active.",
+      flags: 64,
+    });
+  }
 
   try {
     const startTime = Date.now();

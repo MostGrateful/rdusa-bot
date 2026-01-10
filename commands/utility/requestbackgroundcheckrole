@@ -1,0 +1,66 @@
+import {
+  SlashCommandBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  ActionRowBuilder,
+} from "discord.js";
+
+export default {
+  data: new SlashCommandBuilder()
+    .setName("requestbackgroundcheckrole")
+    .setDescription("Submit a request for the Background Check role."),
+
+  /**
+   * @param {import('discord.js').ChatInputCommandInteraction} interaction
+   * @param {import('discord.js').Client} client
+   */
+  async execute(interaction, client) {
+    const modal = new ModalBuilder()
+      .setCustomId("requestBackgroundCheckRoleModal")
+      .setTitle("Request Background Check Role");
+
+    const username = new TextInputBuilder()
+      .setCustomId("bg_username")
+      .setLabel("Username")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const armyRank = new TextInputBuilder()
+      .setCustomId("bg_armyrank")
+      .setLabel("Army Rank")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const division = new TextInputBuilder()
+      .setCustomId("bg_division")
+      .setLabel("Division")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const divisionRank = new TextInputBuilder()
+      .setCustomId("bg_divisionrank")
+      .setLabel("Division Rank")
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true);
+
+    const reason = new TextInputBuilder()
+      .setCustomId("bg_reason")
+      .setLabel("Reason & division benefit")
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder(
+        "Why do you need the background check role and how will it benefit your division?"
+      )
+      .setRequired(true);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(username),
+      new ActionRowBuilder().addComponents(armyRank),
+      new ActionRowBuilder().addComponents(division),
+      new ActionRowBuilder().addComponents(divisionRank),
+      new ActionRowBuilder().addComponents(reason),
+    );
+
+    await interaction.showModal(modal);
+  },
+};

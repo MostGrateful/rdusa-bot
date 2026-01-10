@@ -152,7 +152,7 @@ export async function handleQOTDButtons(interaction, client) {
       autoArchiveDuration: 1440,
     });
 
-    await thread.send(`💬 Discuss the QOTD here! Only <@&${THREAD_ROLE}> can chat.`);
+    await thread.send(`💬 Discuss the QOTD here!`);
 
     client.qotdDraft = null;
 

@@ -1,0 +1,51 @@
+// commands/utility/thanksgiving.js
+import { SlashCommandBuilder } from "discord.js";
+
+const GIFS = [
+  "https://tenor.com/view/snoopy1-gif-16801407831082694355",
+  "https://tenor.com/view/thanksgiving-gif-27127662",
+  "https://media.tenor.com/EExgYYXGdvsAAAA1/thanksgiving-happy-thanksgiving.webp",
+  "https://tenor.com/view/thanksgiving-happy-thanksgiving-thanksgiving-friends-thanksgiving-best-friends-happy-thankgiving-gif-1174419574809327355",
+  "https://tenor.com/view/thanksgiving-turkey-gif-1214840775723058214",
+  "https://tenor.com/view/happy-thanksgiving-gif-823013652954054406",
+  "https://tenor.com/view/thanksgiving-pants-gif-10017379888558517882",
+  "https://tenor.com/view/happy-thanksgiving-gif-2216099352450709564",
+  "https://tenor.com/view/happy-thanksgiving-thanksgiving-gif-1566094422829568030",
+  "https://tenor.com/view/martin-payne-hungry-thanksgiving-thanksgiving-dinner-martin-lawrence-gif-14952314228429518841",
+  "https://tenor.com/view/dog-turkey-costume-pugs-happy-thanksgiving-gif-17073475711521121612",
+  "https://tenor.com/view/thanksgiving-cats-gif-23925002",
+  "https://tenor.com/view/turkeyday-thanksgiving-happy-day-funnyturkey-gif-16519992795602281816",
+  "https://tenor.com/view/turkey-thanksgiving-vintagetv-cooking-gif-3221983324884914250",
+  "https://tenor.com/view/wait-for-me-im-coming-im-coming-for-you-wow-celebrate-gif-15968601485310155055",
+  "https://tenor.com/view/full-house-michelle-tanner-olsen-twins-wait-for-me-i-got-little-legs-gif-5056168",
+  "https://tenor.com/view/turkey-thanksgiving-bird-appalled-confused-gif-1896657142000999039",
+  "https://tenor.com/view/big-neck-dancing-turkey-turkey-run-running-turkey-funny-gif-17530501",
+  "https://tenor.com/view/turkey-gun-running-road-gif-15595030",
+  "https://tenor.com/view/happy-thanksgiving-snoopy-happy-thankgiving-gif-5060922936675060577",
+];
+
+export default {
+  data: new SlashCommandBuilder()
+    .setName("thanksgiving")
+    .setDescription("Send a random SFW Thanksgiving meme (available until 11/27/2028)."),
+
+  async execute(interaction) {
+    const now = new Date();
+    const cutoff = new Date("2028-11-28T00:00:00Z");
+
+    // ⛔ Command expires after 11/27/2028
+    if (now >= cutoff) {
+      return interaction.reply(
+        "🦃 This Thanksgiving command has expired.\nHope you had a wonderful holiday! 🍂"
+      );
+    }
+
+    // 🎲 Select a random GIF
+    const randomGif = GIFS[Math.floor(Math.random() * GIFS.length)];
+
+    // 🟧 Plain text reply
+    return interaction.reply(
+      `🦃 Happy Thanksgiving, <@${interaction.user.id}>!\nEnjoy your meme! 🍁\n${randomGif}`
+    );
+  },
+};

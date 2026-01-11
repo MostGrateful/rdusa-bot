@@ -1,3 +1,4 @@
+// index.js
 import {
   Client,
   GatewayIntentBits,
@@ -56,6 +57,7 @@ try {
     connectionLimit: 5,
     queueLimit: 0,
   });
+
   client.db = db;
   console.log("🗄️ MySQL Database connected successfully.");
 
@@ -78,6 +80,7 @@ try {
       UNIQUE KEY uniq_message (message_id)
     );
   `);
+
   console.log("🧾 discord_requests table ensured.");
 } catch (err) {
   console.error("❌ Failed to connect to MySQL:", err);
@@ -133,7 +136,7 @@ client.once("clientReady", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
   let activityName = "RDUSA";
-  let activityType = 3;
+  let activityType = 3; // Watching
   let status = "online";
 
   const db = client.db;
@@ -180,6 +183,7 @@ client.once("clientReady", async () => {
       )
       .setFooter({ text: "RDUSA Bot Logging System" })
       .setTimestamp();
+
     await devLogChannel.send({ embeds: [startupEmbed] });
   }
 
@@ -198,10 +202,20 @@ client.once("clientReady", async () => {
 client.on("interactionCreate", async (interaction) => {
   const db = client.db;
 
-  // ✅ QOTD Modal
-  if (interaction.isModalSubmit() && interaction.customId === "qotd_modal") {
+  // ✅ QOTD Create/Edit Modal (NEW IDS)
+  if (
+    interaction.isModalSubmit() &&
+    (interaction.customId === "qotd_create_modal" ||
+      interaction.customId.startsWith("qotd_edit_modal:"))
+  ) {
     const { handleQOTDModal } = await import("./commands/utility/qotd.js");
     return handleQOTDModal(interaction, client);
+  }
+
+  // ✅ QOTD Buttons (NEW IDS)
+  if (interaction.isButton() && interaction.customId.startsWith("qotd_")) {
+    const { handleQOTDButtons } = await import("./commands/utility/qotd.js");
+    return handleQOTDButtons(interaction, client);
   }
 
   // ✅ Suggestion Modal
@@ -217,10 +231,7 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   // ✅ Request Background Check Role Modal
-  if (
-    interaction.isModalSubmit() &&
-    interaction.customId === "requestBackgroundCheckRoleModal"
-  ) {
+  if (interaction.isModalSubmit() && interaction.customId === "requestBackgroundCheckRoleModal") {
     const BACKGROUND_MANAGER_CHANNEL = "1439479062572699739";
     const NORMAL_LOG_CHANNEL = "1388886528968622080";
     const DEV_LOG_CHANNEL = "1388955430318768179";
@@ -239,11 +250,7 @@ client.on("interactionCreate", async (interaction) => {
         { name: "Army Rank", value: armyRank, inline: true },
         { name: "Division", value: division, inline: true },
         { name: "Division Rank", value: divisionRank, inline: true },
-        {
-          name: "Reason & Division Benefit",
-          value: reason || "No reason provided.",
-          inline: false,
-        },
+        { name: "Reason & Division Benefit", value: reason || "No reason provided.", inline: false },
         { name: "Requested By", value: `<@${interaction.user.id}>`, inline: false },
       )
       .setTimestamp();
@@ -252,8 +259,7 @@ client.on("interactionCreate", async (interaction) => {
       const bgChannel = await interaction.client.channels.fetch(BACKGROUND_MANAGER_CHANNEL);
       if (bgChannel) {
         await bgChannel.send({
-          content:
-            "<@238058962711216130> A new **Background Check Role** request has been submitted.",
+          content: "<@238058962711216130> A new **Background Check Role** request has been submitted.",
           embeds: [embed],
         });
       }
@@ -293,9 +299,15 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  // ✅ Edit-Embed Modal (FIXED ROUTE)
+  // ✅ Edit-Embed Modal (for /editembed)  ✅ NEW HANDLER
   if (interaction.isModalSubmit() && interaction.customId.startsWith("editembed_modal:")) {
-    const { handleEditEmbedModal } = await import("./commands/utility/editembed.js");
+    const { handleEditEmbedModal } = await import("./commands/Management/editembed.js");
+    return handleEditEmbedModal(interaction, client);
+  }
+
+  // ✅ Edit-Embed Modal (legacy ids you used earlier)
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("editembed:")) {
+    const { handleEditEmbedModal } = await import("./commands/Management/editembed.js");
     return handleEditEmbedModal(interaction, client);
   }
 
@@ -305,7 +317,9 @@ client.on("interactionCreate", async (interaction) => {
   // ─────────────────────────────────────────────
   if (interaction.isModalSubmit() && interaction.customId.startsWith("commission_deny_modal:")) {
     if (!db)
-      return interaction.reply({ content: "❌ Database not available.", flags: 64 }).catch(() => null);
+      return interaction
+        .reply({ content: "❌ Database not available.", flags: 64 })
+        .catch(() => null);
 
     const messageId = interaction.customId.split(":")[1];
     const denyReason = interaction.fields.getTextInputValue("deny_reason");
@@ -316,12 +330,16 @@ client.on("interactionCreate", async (interaction) => {
     );
 
     if (!rows.length) {
-      return interaction.reply({ content: "❌ Request not found in database.", flags: 64 }).catch(() => null);
+      return interaction
+        .reply({ content: "❌ Request not found in database.", flags: 64 })
+        .catch(() => null);
     }
 
     const req = rows[0];
     if (req.status !== "pending") {
-      return interaction.reply({ content: "⚠️ This request was already processed.", flags: 64 }).catch(() => null);
+      return interaction
+        .reply({ content: "⚠️ This request was already processed.", flags: 64 })
+        .catch(() => null);
     }
 
     await db.query(
@@ -339,18 +357,27 @@ client.on("interactionCreate", async (interaction) => {
 
       const fields = deniedEmbed.data.fields ?? [];
       const statusIndex = fields.findIndex((f) => f.name?.toLowerCase() === "status");
-      const statusValue = `❌ Denied by ${interaction.user.tag}\n**Reason:** ${denyReason}`;
 
       if (statusIndex !== -1) {
-        deniedEmbed.spliceFields(statusIndex, 1, { name: "Status", value: statusValue, inline: false });
+        deniedEmbed.spliceFields(statusIndex, 1, {
+          name: "Status",
+          value: `❌ Denied by ${interaction.user.tag}\n**Reason:** ${denyReason}`,
+          inline: false,
+        });
       } else {
-        deniedEmbed.addFields({ name: "Status", value: statusValue, inline: false });
+        deniedEmbed.addFields({
+          name: "Status",
+          value: `❌ Denied by ${interaction.user.tag}\n**Reason:** ${denyReason}`,
+          inline: false,
+        });
       }
 
       await msg.edit({ embeds: [deniedEmbed], components: [] }).catch(() => null);
     }
 
-    return interaction.reply({ content: "❌ Request denied and buttons removed.", flags: 64 }).catch(() => null);
+    return interaction
+      .reply({ content: "❌ Request denied and buttons removed.", flags: 64 })
+      .catch(() => null);
   }
 
   // ─────────────────────────────────────────────
@@ -377,23 +404,25 @@ client.on("interactionCreate", async (interaction) => {
   ];
 
   if (interaction.isButton() && interaction.customId.startsWith("commission_")) {
-    if (!db) {
-      return interaction.reply({ content: "❌ Database not available.", flags: 64 }).catch(() => null);
-    }
+    if (!db)
+      return interaction
+        .reply({ content: "❌ Database not available.", flags: 64 })
+        .catch(() => null);
 
     const member = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
     const isAuthorized = member?.roles?.cache?.some((r) => APPROVED_ROLES.includes(r.id));
 
     if (!isAuthorized) {
-      return interaction.reply({
-        content: "🚫 You are not authorized to manage this request.",
-        flags: 64,
-      }).catch(() => null);
+      return interaction
+        .reply({ content: "🚫 You are not authorized to manage this request.", flags: 64 })
+        .catch(() => null);
     }
 
     const [action, messageId] = interaction.customId.split(":");
     if (!messageId) {
-      return interaction.reply({ content: "❌ Invalid button payload.", flags: 64 }).catch(() => null);
+      return interaction
+        .reply({ content: "❌ Invalid button payload.", flags: 64 })
+        .catch(() => null);
     }
 
     const [rows] = await db.query(
@@ -402,17 +431,21 @@ client.on("interactionCreate", async (interaction) => {
     );
 
     if (!rows.length) {
-      return interaction.reply({ content: "❌ Request not found in database.", flags: 64 }).catch(() => null);
+      return interaction
+        .reply({ content: "❌ Request not found in database.", flags: 64 })
+        .catch(() => null);
     }
 
     const req = rows[0];
 
+    // Already processed -> remove buttons if still present
     if (req.status !== "pending") {
       await interaction.deferUpdate().catch(() => null);
       await interaction.message.edit({ components: [] }).catch(() => null);
       return;
     }
 
+    // ✅ APPROVE
     if (action === "commission_accept") {
       await interaction.deferUpdate().catch(() => null);
 
@@ -427,12 +460,19 @@ client.on("interactionCreate", async (interaction) => {
 
       const fields = approvedEmbed.data.fields ?? [];
       const statusIndex = fields.findIndex((f) => f.name?.toLowerCase() === "status");
-      const statusValue = `✅ Approved by ${interaction.user.tag}`;
 
       if (statusIndex !== -1) {
-        approvedEmbed.spliceFields(statusIndex, 1, { name: "Status", value: statusValue, inline: false });
+        approvedEmbed.spliceFields(statusIndex, 1, {
+          name: "Status",
+          value: `✅ Approved by ${interaction.user.tag}`,
+          inline: false,
+        });
       } else {
-        approvedEmbed.addFields({ name: "Status", value: statusValue, inline: false });
+        approvedEmbed.addFields({
+          name: "Status",
+          value: `✅ Approved by ${interaction.user.tag}`,
+          inline: false,
+        });
       }
 
       approvedEmbed.setFooter({ text: `Approved • ${new Date().toLocaleString()}` });
@@ -441,6 +481,7 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
+    // ❌ DENY -> open modal (persistent)
     if (action === "commission_deny") {
       const modal = new ModalBuilder()
         .setCustomId(`commission_deny_modal:${messageId}`)
@@ -534,8 +575,7 @@ client.on("interactionCreate", async (interaction) => {
     OWNER_ONLY_COMMANDS.includes(interaction.commandName)
   ) {
     return interaction.reply({
-      content:
-        "🚫 This command is restricted to the bot owner, even while maintenance mode is active.",
+      content: "🚫 This command is restricted to the bot owner, even while maintenance mode is active.",
       flags: 64,
     });
   }

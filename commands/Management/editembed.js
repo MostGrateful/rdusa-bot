@@ -1,4 +1,4 @@
-// commands/utility/editembed.js
+// commands/Management/editembed.js
 import {
   SlashCommandBuilder,
   ModalBuilder,
@@ -9,11 +9,13 @@ import {
   PermissionFlagsBits,
 } from "discord.js";
 
-import { getEmbedSections } from "../../utils/embedStore.js";
-
 const OWNER_ID = "238058962711216130";
 const MANAGER_ROLE_ID = "1332197345403605123"; // CoC role
 const GUILD_LOG_CHANNEL = "1388886528968622080"; // mod log channel
+
+function safeLower(x) {
+  return String(x ?? "").toLowerCase();
+}
 
 export default {
   data: new SlashCommandBuilder()
@@ -32,10 +34,7 @@ export default {
         ),
     )
     .addIntegerOption((opt) =>
-      opt
-        .setName("section")
-        .setDescription("Which section number to edit?")
-        .setRequired(true),
+      opt.setName("section").setDescription("Which section number to edit?").setRequired(true),
     )
     .addStringOption((opt) =>
       opt
@@ -49,73 +48,68 @@ export default {
         ),
     ),
 
-  /**
-   * @param {import("discord.js").ChatInputCommandInteraction} interaction
-   * @param {import("discord.js").Client} client
-   */
   async execute(interaction, client) {
+    // 🚫 DO NOT deferReply here — you cannot showModal after replying/defer
     const db = client.db;
     if (!db) {
-      return interaction.reply({
-        content: "❌ Database not available.",
-        flags: 64,
-      });
+      return interaction.reply({ content: "❌ Database not available.", flags: 64 });
     }
 
-    // ✅ Permission check
-    const member =
-      interaction.member ??
-      (interaction.guild
-        ? await interaction.guild.members.fetch(interaction.user.id).catch(() => null)
-        : null);
-
+    const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
     const isOwner = interaction.user.id === OWNER_ID;
-    const hasManagerRole = member?.roles?.cache?.has(MANAGER_ROLE_ID) ?? false;
+    const hasManagerRole = member?.roles?.cache?.has(MANAGER_ROLE_ID);
 
     if (!isOwner && !hasManagerRole) {
-      return interaction.reply({
-        content: "🚫 You are not allowed to edit embeds.",
-        flags: 64,
-      });
+      return interaction.reply({ content: "🚫 You are not allowed to edit embeds.", flags: 64 });
     }
 
     const category = interaction.options.getString("embed");
     const section = interaction.options.getInteger("section");
     const field = interaction.options.getString("field");
 
-    // ✅ Validate section exists
-    const sections = await getEmbedSections(db, category);
+    // Pull ALL sections for that category (so we can show real "Available:" list)
+    const [sections] = await db.query(
+      "SELECT section_number, title, description, footer FROM embed_sections WHERE category = ? ORDER BY section_number ASC",
+      [category],
+    );
+
     const entry = sections.find((s) => Number(s.section_number) === Number(section));
 
     if (!entry) {
+      const available = sections
+        .map((s) => `${s.section_number}${s.title ? ` (${s.title})` : ""}`)
+        .join(", ");
+
       return interaction.reply({
-        content: `❌ No section **${section}** found for **${category}**.`,
+        content: `❌ No section **${section}** found for **${category}**.\nAvailable: ${available || "None"}`,
         flags: 64,
       });
     }
 
     const currentValue =
-      field === "title" ? entry.title : field === "footer" ? entry.footer : entry.description;
+      field === "title"
+        ? entry.title ?? ""
+        : field === "footer"
+          ? entry.footer ?? ""
+          : entry.description ?? "";
 
-    // ✅ Build modal
+    // ✅ modal customId MUST match your index.js handler:
+    // startsWith("editembed_modal:")
     const modal = new ModalBuilder()
-      .setCustomId(`editembed:${category}:${section}:${field}`)
+      .setCustomId(`editembed_modal:${category}:${section}:${field}`)
       .setTitle(`Edit ${category} • Section ${section}`);
 
     const input = new TextInputBuilder()
       .setCustomId("new_value")
-      .setLabel(`New ${field}`)
-      .setStyle(field === "title" || field === "footer" ? TextInputStyle.Short : TextInputStyle.Paragraph)
+      .setLabel(`Editing: ${field}`)
+      .setStyle(TextInputStyle.Paragraph)
       .setRequired(true)
-      .setValue((currentValue ?? "").slice(0, 4000)); // Discord limits safety
+      .setValue(String(currentValue).slice(0, 4000)); // Discord max
 
     modal.addComponents(new ActionRowBuilder().addComponents(input));
 
-    // ✅ IMPORTANT: showModal must be FIRST response (no defer/reply before this)
-    await interaction.showModal(modal);
-
-    // ✅ Logging: initiated (after showing modal)
-    const guildLog = interaction.guild?.channels?.cache?.get(GUILD_LOG_CHANNEL) ?? null;
+    // Log "initiated" (optional but you wanted logging)
+    const guildLog = interaction.guild.channels.cache.get(GUILD_LOG_CHANNEL);
     const devLog = await client.channels.fetch(process.env.DEV_LOG_CHANNEL_ID).catch(() => null);
 
     const logEmbed = new EmbedBuilder()
@@ -124,12 +118,58 @@ export default {
       .addFields(
         { name: "User", value: `${interaction.user.tag} (${interaction.user.id})` },
         { name: "Category", value: category },
-        { name: "Section", value: String(section), inline: true },
-        { name: "Field", value: field, inline: true },
+        { name: "Section", value: String(section) },
+        { name: "Field", value: field },
       )
       .setTimestamp();
 
     if (guildLog) guildLog.send({ embeds: [logEmbed] }).catch(() => null);
     if (devLog) devLog.send({ embeds: [logEmbed] }).catch(() => null);
+
+    // ✅ show modal
+    return interaction.showModal(modal);
   },
 };
+
+// ✅ Modal submit handler used by index.js
+export async function handleEditEmbedModal(interaction, client) {
+  const db = client.db;
+  if (!db) {
+    return interaction.reply({ content: "❌ Database not available.", flags: 64 }).catch(() => null);
+  }
+
+  // customId: editembed_modal:<category>:<section>:<field>
+  const parts = interaction.customId.split(":");
+  // [ "editembed_modal", category, section, field ]
+  const category = parts[1];
+  const section = Number(parts[2]);
+  const field = parts[3];
+
+  const newValue = interaction.fields.getTextInputValue("new_value") ?? "";
+
+  const allowedFields = new Set(["title", "description", "footer"]);
+  if (!allowedFields.has(field)) {
+    return interaction.reply({ content: "❌ Invalid field.", flags: 64 }).catch(() => null);
+  }
+
+  // Update row
+  const sql = `UPDATE embed_sections SET ${field} = ? WHERE category = ? AND section_number = ? LIMIT 1`;
+  const [result] = await db.query(sql, [newValue, category, section]);
+
+  if (!result?.affectedRows) {
+    return interaction
+      .reply({
+        content: `❌ Update failed. No row matched category=${category}, section=${section}.`,
+        flags: 64,
+      })
+      .catch(() => null);
+  }
+
+  // Confirm
+  return interaction
+    .reply({
+      content: `✅ Updated **${category}** section **${section}** (${field}).`,
+      flags: 64,
+    })
+    .catch(() => null);
+}

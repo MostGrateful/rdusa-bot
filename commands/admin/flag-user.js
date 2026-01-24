@@ -151,12 +151,21 @@ async function findOrCreateUserCard(userInfo) {
 
 /**
  * Ensure labels exist + attach them to the card
+ * - Case-insensitive match for existing labels
+ * - Checks if label is already on the card before attaching
  */
 async function ensureLabelsForFlags(cardId, flags) {
+  // Board labels (cache for matching/creating)
   const labelsRes = await fetch(
     `https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&limit=1000`
   );
   const labels = await labelsRes.json();
+
+  // Card labels (avoid duplicates)
+  const cardLabelsRes = await fetch(
+    `https://api.trello.com/1/cards/${cardId}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&limit=1000`
+  );
+  const cardLabels = await cardLabelsRes.json();
 
   const attached = [];
 
@@ -164,9 +173,10 @@ async function ensureLabelsForFlags(cardId, flags) {
     const flagName = flag.trim();
     if (!flagName) continue;
 
-    let label = labels.find(l => l.name?.toLowerCase() === flagName.toLowerCase());
+    // ✅ Find existing label case-insensitive
+    let label = labels.find(l => (l.name || "").toLowerCase() === flagName.toLowerCase());
 
-    // Create label if missing
+    // ✅ Create label if missing
     if (!label) {
       const createRes = await fetch(
         `https://api.trello.com/1/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
@@ -181,17 +191,43 @@ async function ensureLabelsForFlags(cardId, flags) {
         }
       );
       label = await createRes.json();
+      // Keep local list up to date to prevent duplicate creates in same run
+      labels.push(label);
     }
 
-    await fetch(
-      `https://api.trello.com/1/cards/${cardId}/idLabels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&value=${label.id}`,
-      { method: "POST" }
-    );
+    // ✅ If the card already has this label (case-insensitive by ID), skip attaching
+    const alreadyOnCard = cardLabels.some(cl => cl.id === label.id);
+    if (!alreadyOnCard) {
+      await fetch(
+        `https://api.trello.com/1/cards/${cardId}/idLabels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&value=${label.id}`,
+        { method: "POST" }
+      );
+      cardLabels.push(label);
+    }
 
     attached.push(flagName);
   }
 
   return attached;
+}
+
+/**
+ * Send log embed to mod log channel and dev command log channel (if available)
+ */
+async function sendLogEmbeds(interaction, embed) {
+  try {
+    const modChannel = await interaction.client.channels.fetch(MOD_LOG_CHANNEL_ID).catch(() => null);
+    if (modChannel) {
+      await modChannel.send({ embeds: [embed] }).catch(() => null);
+    }
+  } catch {}
+
+  try {
+    const devChannel = await interaction.client.channels.fetch(DEV_COMMAND_LOG_CHANNEL_ID).catch(() => null);
+    if (devChannel) {
+      await devChannel.send({ embeds: [embed] }).catch(() => null);
+    }
+  } catch {}
 }
 
 export default {
@@ -264,7 +300,7 @@ export default {
       // Shared card naming with backgroundcheck.js
       const card = await findOrCreateUserCard(userInfo);
 
-      // Create/attach labels
+      // Create/attach labels (case-insensitive + no duplicates on card)
       const attachedFlags = await ensureLabelsForFlags(card.id, flags);
 
       // Trello comment
@@ -301,6 +337,9 @@ export default {
           { name: "Approved By", value: approvedBy, inline: true }
         )
         .setTimestamp();
+
+      // ✅ Send logs to <#1439479062572699739> and also dev log if available
+      await sendLogEmbeds(interaction, logEmbed);
 
       await interaction.editReply(
         `✅ Added flag(s) **${attachedFlags.join(", ")}** to **${userInfo.username}**.`

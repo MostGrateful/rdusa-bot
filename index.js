@@ -21,6 +21,111 @@ import { updateChainOfCommand } from "./utils/updateCoC.js";
 dotenv.config();
 
 // ───────────────────────────────
+// 🚫 Trello Global Blacklist Helpers (Board/List based)
+// Board shortlink: iD9Bu3c1
+// List name: Blacklisted Users
+// ───────────────────────────────
+const TRELLO_BLACKLIST_BOARD_SHORTLINK = "iD9Bu3c1";
+const TRELLO_BLACKLIST_LIST_NAME = "Blacklisted Users";
+
+// Cache to avoid hitting Trello every command
+// userId -> { blacklisted: boolean, reason: string|null, expires: number }
+const trelloBlacklistCache = new Map();
+const TRELLO_BLACKLIST_CACHE_MS = 60_000;
+
+function _norm(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+async function _trelloFetchJson(url, options) {
+  const res = await fetch(url, options);
+  const text = await res.text().catch(() => "");
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+  return { ok: res.ok, status: res.status, data };
+}
+
+async function getTrelloBlacklistListId() {
+  const key = process.env.TRELLO_API_KEY;
+  const token = process.env.TRELLO_TOKEN;
+
+  if (!key || !token) return null;
+
+  const { ok, data } = await _trelloFetchJson(
+    `https://api.trello.com/1/boards/${TRELLO_BLACKLIST_BOARD_SHORTLINK}/lists?key=${key}&token=${token}`
+  );
+  if (!ok || !Array.isArray(data)) return null;
+
+  const list = data.find(l => _norm(l.name) === _norm(TRELLO_BLACKLIST_LIST_NAME));
+  return list?.id || null;
+}
+
+function cardMatchesDiscordId(card, userId) {
+  const id = String(userId);
+  const name = String(card?.name || "");
+  const desc = String(card?.desc || "");
+  return name.includes(`(${id})`) || name.includes(id) || desc.includes(id);
+}
+
+function extractReasonFromDesc(desc) {
+  const text = String(desc || "");
+  const match = text.match(/reason:\s*(.+)/i);
+  if (!match) return null;
+
+  const reason = match[1].trim();
+  if (!reason) return null;
+
+  return reason.length > 500 ? reason.slice(0, 497) + "..." : reason;
+}
+
+async function isUserBlacklistedTrello(userId) {
+  const now = Date.now();
+  const cached = trelloBlacklistCache.get(userId);
+  if (cached && cached.expires > now) return cached;
+
+  // If Trello creds missing, fail open (don’t block)
+  const key = process.env.TRELLO_API_KEY;
+  const token = process.env.TRELLO_TOKEN;
+  if (!key || !token) {
+    const result = { blacklisted: false, reason: null, expires: now + TRELLO_BLACKLIST_CACHE_MS };
+    trelloBlacklistCache.set(userId, result);
+    return result;
+  }
+
+  const listId = await getTrelloBlacklistListId();
+  if (!listId) {
+    const result = { blacklisted: false, reason: null, expires: now + TRELLO_BLACKLIST_CACHE_MS };
+    trelloBlacklistCache.set(userId, result);
+    return result;
+  }
+
+  const { ok, data: cards } = await _trelloFetchJson(
+    `https://api.trello.com/1/lists/${listId}/cards?key=${key}&token=${token}`
+  );
+
+  if (!ok || !Array.isArray(cards)) {
+    const result = { blacklisted: false, reason: null, expires: now + TRELLO_BLACKLIST_CACHE_MS };
+    trelloBlacklistCache.set(userId, result);
+    return result;
+  }
+
+  const card = cards.find(c => cardMatchesDiscordId(c, userId)) || null;
+
+  const result = {
+    blacklisted: !!card,
+    reason: card ? extractReasonFromDesc(card.desc) : null,
+    expires: now + TRELLO_BLACKLIST_CACHE_MS,
+  };
+
+  trelloBlacklistCache.set(userId, result);
+  return result;
+}
+
+// ───────────────────────────────
 // ⚙️ Error Guards (Prevents Crashes)
 // ───────────────────────────────
 process.on("unhandledRejection", (error) => {
@@ -502,7 +607,7 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   // 🛠️ Maintenance mode + override logic
-  const OWNER_ID = "238058962711216130";
+  const BOT_OWNER_ID = "238058962711216130";
   const MAINT_OVERRIDE_ROLE_ID = "1442276596558987446";
 
   const member =
@@ -511,7 +616,7 @@ client.on("interactionCreate", async (interaction) => {
       ? await interaction.guild.members.fetch(interaction.user.id).catch(() => null)
       : null);
 
-  const isOwner = interaction.user.id === OWNER_ID;
+  const isOwner = interaction.user.id === BOT_OWNER_ID;
   const hasOverrideRole = member?.roles?.cache?.has(MAINT_OVERRIDE_ROLE_ID) ?? false;
 
   const isMaintenanceBypass = isOwner || hasOverrideRole;
@@ -535,23 +640,26 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
-  // 🚫 Global Blacklist Check (SQL-based)
+  // 🚫 Global Blacklist Check (Trello-based)
   try {
-    if (db) {
-      const [rows] = await db.query("SELECT reason FROM bot_blacklist WHERE user_id = ?", [
-        interaction.user.id,
-      ]);
+    // allow owner bypass
+    if (!isOwner) {
+      // always allow /blacklist so you can remove people
+      if (interaction.commandName !== "blacklist") {
+        const result = await isUserBlacklistedTrello(interaction.user.id);
 
-      if (rows.length > 0) {
-        const reason = rows[0].reason || "No reason provided.";
-        return interaction.reply({
-          content: "🚫 You are blacklisted from using this bot.\n" + `**Reason:** ${reason}`,
-          flags: 64,
-        });
+        if (result.blacklisted) {
+          return interaction.reply({
+            content:
+              "🚫 You are blacklisted from using this bot." +
+              (result.reason ? `\n**Reason:** ${result.reason}` : ""),
+            flags: 64,
+          });
+        }
       }
     }
   } catch (err) {
-    console.error("⚠️ Global blacklist check failed:", err);
+    console.error("⚠️ Global Trello blacklist check failed:", err);
   }
 
   const command = client.commands.get(interaction.commandName);

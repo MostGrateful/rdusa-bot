@@ -11,6 +11,35 @@ const {
   TRELLO_LIST_BLACKLIST,  // name of blacklist list (optional)
 } = process.env;
 
+// Where to send command logs
+const MOD_LOG_CHANNEL_ID = "1439479062572699739";
+
+function normalizeLabelName(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+async function safeFetchJson(url, options) {
+  const res = await fetch(url, options);
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    // ignore json parse errors
+  }
+  return { ok: res.ok, status: res.status, data };
+}
+
+async function sendModLog(interaction, embed) {
+  try {
+    const channel = await interaction.client.channels
+      .fetch(MOD_LOG_CHANNEL_ID)
+      .catch(() => null);
+    if (channel) await channel.send({ embeds: [embed] }).catch(() => null);
+  } catch {
+    // ignore
+  }
+}
+
 export default {
   data: new SlashCommandBuilder()
     .setName("backgroundcheck")
@@ -27,6 +56,7 @@ export default {
       // 🔐 Role check
       const roleId = "1387212542245339209";
       if (!interaction.member.roles.cache.has(roleId)) {
+        // Keep unauthorized private (recommended)
         return interaction.reply({
           content: "❌ Unauthorized. You cannot use this command.",
           flags: 64,
@@ -34,6 +64,8 @@ export default {
       }
 
       const username = interaction.options.getString("username").trim();
+
+      // Ephemeral "working" message for the command user
       await interaction.reply({
         content: `🔎 Searching Roblox profile for **${username}**...`,
         flags: 64,
@@ -59,6 +91,7 @@ export default {
 
       const profileRes = await fetch(`https://users.roblox.com/v1/users/${userId}`);
       const profileData = await profileRes.json();
+
       const createdAt = new Date(profileData.created);
       const joinDate = createdAt.toLocaleDateString();
       const accountAgeDays = Math.floor((Date.now() - createdAt.getTime()) / 86400000);
@@ -170,81 +203,111 @@ export default {
         }
       }
 
-      // 🚩 Blacklist logic (optional)
-      let flaggedGroups = [];
-      if (TRELLO_LIST_BLACKLIST) {
-        const blacklistList = lists.find(l => l.name === TRELLO_LIST_BLACKLIST);
-        if (blacklistList) {
-          const blRes = await fetch(
-            `https://api.trello.com/1/lists/${blacklistList.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
-          );
-          const blCards = await blRes.json();
-          const blIds = blCards
-            .map(c => parseInt(c.name, 10))
-            .filter(id => !Number.isNaN(id));
+      // Pre-fetch card labels once (used by blacklist & account<30 logic)
+      const cardLabelsRes0 = await fetch(
+        `https://api.trello.com/1/cards/${userCard.id}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&limit=1000`
+      );
+      const cardLabels0 = await cardLabelsRes0.json();
 
-          flaggedGroups = userGroups.filter(id => blIds.includes(id));
-
-          if (flaggedGroups.length > 0) {
-            // Ensure "Flagged" label exists on REAL board
-            const boardLabelsRes = await fetch(
-              `https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
-            );
-            const boardLabels = await boardLabelsRes.json();
-
-            let flaggedLabel = boardLabels.find(l => l.name === "Flagged");
-            if (!flaggedLabel) {
-              const createLabelRes = await fetch(
-                `https://api.trello.com/1/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    idBoard: TRELLO_BOARD_ID,
-                    name: "Flagged",
-                    color: "red",
-                  }),
-                }
-              );
-              flaggedLabel = await createLabelRes.json();
-            }
-
-            await fetch(
-              `https://api.trello.com/1/cards/${userCard.id}/idLabels?value=${flaggedLabel.id}&key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-              { method: "POST" }
-            );
-          }
-        }
-      }
-
-      // ⚠️ Account <30 label (REAL board ID)
-      if (isNewAccount) {
-        const labelsRes = await fetch(
-          `https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+      // Helper to get/create a board label case-insensitively
+      async function getOrCreateBoardLabel(labelName, color) {
+        const { ok, data: boardLabels } = await safeFetchJson(
+          `https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&limit=1000`
         );
-        const labels = await labelsRes.json();
 
-        let thirtyLabel = labels.find(l => l.name === "Account <30");
-        if (!thirtyLabel) {
-          const createLabelRes = await fetch(
+        if (!ok || !Array.isArray(boardLabels)) {
+          throw new Error("Failed to fetch Trello board labels.");
+        }
+
+        const want = normalizeLabelName(labelName);
+        let label = boardLabels.find(l => normalizeLabelName(l.name) === want);
+
+        if (!label) {
+          const created = await safeFetchJson(
             `https://api.trello.com/1/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
                 idBoard: TRELLO_BOARD_ID,
-                name: "Account <30",
-                color: "yellow",
+                name: labelName,
+                color,
               }),
             }
           );
-          thirtyLabel = await createLabelRes.json();
+
+          if (!created.ok || !created.data?.id) {
+            throw new Error(`Failed to create Trello label: ${labelName}`);
+          }
+          label = created.data;
         }
 
-        await fetch(
-          `https://api.trello.com/1/cards/${userCard.id}/idLabels?value=${thirtyLabel.id}&key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-          { method: "POST" }
+        return label;
+      }
+
+      // Helper to attach/remove card label safely (no duplicates)
+      async function ensureCardHasLabel(cardId, cardLabels, labelId, shouldHave) {
+        const hasIt = cardLabels.some(l => l.id === labelId);
+
+        if (shouldHave && !hasIt) {
+          await fetch(
+            `https://api.trello.com/1/cards/${cardId}/idLabels?value=${labelId}&key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+            { method: "POST" }
+          );
+          cardLabels.push({ id: labelId }); // keep local state in sync
+        }
+
+        if (!shouldHave && hasIt) {
+          await fetch(
+            `https://api.trello.com/1/cards/${cardId}/idLabels/${labelId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
+            { method: "DELETE" }
+          );
+          // remove from local state
+          const idx = cardLabels.findIndex(l => l.id === labelId);
+          if (idx !== -1) cardLabels.splice(idx, 1);
+        }
+      }
+
+      // 🚩 Blacklist logic (optional) + AUTO-ADD/REMOVE "Flagged - Blacklisted Group" (case-insensitive)
+      let flaggedGroups = [];
+
+      if (TRELLO_LIST_BLACKLIST) {
+        const blacklistList = lists.find(
+          l => normalizeLabelName(l.name) === normalizeLabelName(TRELLO_LIST_BLACKLIST)
         );
+
+        if (blacklistList) {
+          const blRes = await fetch(
+            `https://api.trello.com/1/lists/${blacklistList.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+          );
+          const blCards = await blRes.json();
+
+          const blIds = (Array.isArray(blCards) ? blCards : [])
+            .map(c => parseInt(String(c?.name || "").trim(), 10))
+            .filter(id => !Number.isNaN(id));
+
+          flaggedGroups = userGroups.filter(id => blIds.includes(id));
+
+          // ✅ Get/Create label (case-insensitive)
+          const blacklistedLabel = await getOrCreateBoardLabel(
+            "Flagged - Blacklisted Group",
+            "red"
+          );
+
+          // ✅ Ensure it's applied/removed based on current membership
+          await ensureCardHasLabel(
+            userCard.id,
+            cardLabels0,
+            blacklistedLabel.id,
+            flaggedGroups.length > 0
+          );
+        }
+      }
+
+      // ⚠️ Account <30 label (REAL board ID) — also case-insensitive + no duplicates
+      if (isNewAccount) {
+        const thirtyLabel = await getOrCreateBoardLabel("Account <30", "yellow");
+        await ensureCardHasLabel(userCard.id, cardLabels0, thirtyLabel.id, true);
       }
 
       // 🔁 FINAL: fetch ALL labels on the card — every label is a flag
@@ -255,12 +318,8 @@ export default {
 
       const allFlags = [
         ...new Set(
-          labelsFinal
-            .map(l => {
-              if (l.name && l.name.trim()) return l.name;
-              if (l.color) return l.color.toUpperCase();
-              return null;
-            })
+          (Array.isArray(labelsFinal) ? labelsFinal : [])
+            .map(l => (l.name && l.name.trim() ? l.name : null))
             .filter(Boolean)
         ),
       ];
@@ -289,7 +348,7 @@ export default {
         console.error("Failed to post Trello comment:", err)
       );
 
-      // 🧾 Discord embed
+      // 🧾 Discord embed (PUBLIC)
       const resultEmbed = new EmbedBuilder()
         .setTitle(`${username} (${userId})`)
         .setColor(hasFlags ? 0xed4245 : 0x57f287)
@@ -306,10 +365,7 @@ export default {
           },
           {
             name: "Blacklisted Groups",
-            value:
-              flaggedGroups.length > 0
-                ? flaggedGroups.join(", ")
-                : "None",
+            value: flaggedGroups.length > 0 ? flaggedGroups.join(", ") : "None",
             inline: false,
           },
           {
@@ -321,9 +377,56 @@ export default {
         .setFooter({ text: "RDUSA Background Check System" })
         .setTimestamp();
 
-      await interaction.editReply({ content: "", embeds: [resultEmbed] });
+      // ✅ Send PUBLIC message anyone can see
+      await interaction.channel.send({ embeds: [resultEmbed] });
+
+      // ✅ Mod Log (like it used to): send to <#1439479062572699739>
+      const logEmbed = new EmbedBuilder()
+        .setColor(hasFlags ? 0xed4245 : 0x57f287)
+        .setTitle("🧾 Background Check Logged")
+        .addFields(
+          { name: "Checked By", value: interaction.user.tag, inline: true },
+          { name: "Roblox Username", value: username, inline: true },
+          { name: "Roblox ID", value: String(userId), inline: true },
+          { name: "Account Age", value: `${accountAgeDays} days`, inline: true },
+          {
+            name: "Flags",
+            value: hasFlags ? allFlags.join(", ") : "None",
+            inline: false,
+          },
+          {
+            name: "Blacklisted Groups",
+            value: flaggedGroups.length > 0 ? flaggedGroups.join(", ") : "None",
+            inline: false,
+          },
+          { name: "Trello Card", value: userCard.url || "N/A", inline: false }
+        )
+        .setTimestamp();
+
+      await sendModLog(interaction, logEmbed);
+
+      // Clear the ephemeral "Searching..." reply
+      await interaction.editReply({ content: "✅ Background check posted.", embeds: [] });
     } catch (err) {
       console.error("Error in /backgroundcheck:", err);
+
+      // Attempt to log failures too
+      try {
+        const failEmbed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle("❌ Background Check Failed")
+          .addFields(
+            { name: "User", value: interaction.user.tag, inline: true },
+            { name: "Channel", value: interaction.channel?.id ? `<#${interaction.channel.id}>` : "Unknown", inline: true },
+            { name: "Error", value: String(err?.message || err).slice(0, 1024), inline: false }
+          )
+          .setTimestamp();
+
+        await sendModLog(interaction, failEmbed);
+      } catch {
+        // ignore
+      }
+
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply({
           content: "❌ An error occurred while running the background check.",

@@ -1,0 +1,178 @@
+import { SlashCommandBuilder, EmbedBuilder, PermissionsBitField } from "discord.js";
+import { logModAction } from "../../utils/modActionLogger.js";
+
+const OWNER_ID = "238058962711216130";
+
+const ALLOWED_ROLE_IDS = [
+  "1347735054822015090",
+  "1369065942243344464",
+  "1369877362224664647",
+  "1332197345403605123",
+  "1332198672720723988",
+];
+
+const MOD_LOG_CHANNEL_ID = process.env.MOD_LOG_CHANNEL_ID || null;
+
+function hasModPerms(member) {
+  if (!member) return false;
+  if (member.id === OWNER_ID) return true;
+  return member.roles?.cache?.some((r) => ALLOWED_ROLE_IDS.includes(r.id)) ?? false;
+}
+
+function isImageAttachment(att) {
+  if (!att) return false;
+  const ct = (att.contentType || "").toLowerCase();
+  if (ct.startsWith("image/")) return true;
+  const name = (att.name || "").toLowerCase();
+  return [".png", ".jpg", ".jpeg", ".gif", ".webp"].some((ext) => name.endsWith(ext));
+}
+
+function safeFieldValue(str, max = 1024) {
+  if (!str) return "None";
+  const s = String(str);
+  return s.length > max ? s.slice(0, max - 3) + "..." : s;
+}
+
+async function sendModLog(interaction, embed) {
+  if (!MOD_LOG_CHANNEL_ID) return;
+  const ch = await interaction.client.channels.fetch(MOD_LOG_CHANNEL_ID).catch(() => null);
+  if (ch?.isTextBased?.()) await ch.send({ embeds: [embed] }).catch(() => null);
+}
+
+function parseDurationMs(input) {
+  const s = String(input || "").trim().toLowerCase();
+  const m = s.match(/^(\d+)\s*(s|m|h|d)$/);
+  if (!m) return null;
+
+  const num = Number(m[1]);
+  if (!Number.isFinite(num) || num <= 0) return null;
+
+  const unit = m[2];
+  const mult =
+    unit === "s" ? 1000 :
+    unit === "m" ? 60_000 :
+    unit === "h" ? 3_600_000 :
+    unit === "d" ? 86_400_000 :
+    null;
+
+  if (!mult) return null;
+  return num * mult;
+}
+
+export default {
+  data: new SlashCommandBuilder()
+    .setName("mute")
+    .setDescription("Mute a user (timeout) for a duration.")
+    .addUserOption((opt) => opt.setName("user").setDescription("User to mute").setRequired(true))
+    .addStringOption((opt) => opt.setName("duration").setDescription("10m, 2h, 7d (max 28d)").setRequired(true))
+    .addStringOption((opt) => opt.setName("reason").setDescription("Reason (optional)").setRequired(false))
+    .addStringOption((opt) => opt.setName("evidence").setDescription("Evidence / notes (optional)").setRequired(false))
+    .addAttachmentOption((opt) => opt.setName("image1").setDescription("Optional evidence image").setRequired(false))
+    .addAttachmentOption((opt) => opt.setName("image2").setDescription("Optional evidence image").setRequired(false))
+    .addAttachmentOption((opt) => opt.setName("image3").setDescription("Optional evidence image").setRequired(false)),
+
+  async execute(interaction, client) {
+    const invoker = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+    if (!hasModPerms(invoker)) return interaction.reply({ content: "🚫 You are not authorized.", flags: 64 });
+    if (!interaction.inGuild()) return interaction.reply({ content: "❌ Server-only command.", flags: 64 });
+
+    await interaction.deferReply({ flags: 64 });
+
+    const targetUser = interaction.options.getUser("user", true);
+    const durationRaw = interaction.options.getString("duration", true);
+    const reasonInput = interaction.options.getString("reason")?.trim() || null;
+    const evidence = interaction.options.getString("evidence")?.trim() || null;
+
+    const ms = parseDurationMs(durationRaw);
+    if (!ms) return interaction.editReply("❌ Invalid duration. Use `10m`, `2h`, `7d` (s/m/h/d).");
+
+    const MAX_MS = 28 * 24 * 60 * 60 * 1000;
+    if (ms > MAX_MS) return interaction.editReply("❌ Duration too long. Max mute is **28 days**.");
+
+    const atts = [
+      interaction.options.getAttachment("image1"),
+      interaction.options.getAttachment("image2"),
+      interaction.options.getAttachment("image3"),
+    ].filter(Boolean);
+
+    for (const att of atts) {
+      if (!isImageAttachment(att)) {
+        return interaction.editReply(
+          `❌ Attachment **${att.name || "file"}** is not a supported image type (png/jpg/gif/webp).`,
+        );
+      }
+    }
+    const evidenceUrls = atts.map((a) => a.url);
+
+    const me = await interaction.guild.members.fetchMe().catch(() => null);
+    if (!me?.permissions.has(PermissionsBitField.Flags.ModerateMembers)) {
+      return interaction.editReply("❌ I do not have permission (**Moderate Members**).");
+    }
+
+    const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+    if (!targetMember) return interaction.editReply("❌ That user is not in this server.");
+
+    if (targetUser.id === interaction.user.id) return interaction.editReply("❌ You cannot mute yourself.");
+    if (targetUser.id === OWNER_ID) return interaction.editReply("❌ You cannot mute the bot owner.");
+
+    if (targetMember.roles.highest.position >= me.roles.highest.position) {
+      return interaction.editReply("❌ I cannot mute this user due to role hierarchy.");
+    }
+    if (
+      invoker &&
+      targetMember.roles.highest.position >= invoker.roles.highest.position &&
+      interaction.user.id !== OWNER_ID
+    ) {
+      return interaction.editReply("❌ You cannot mute someone with equal or higher role than you.");
+    }
+
+    const until = new Date(Date.now() + ms);
+    const unix = Math.floor(until.getTime() / 1000);
+    const reason = reasonInput || `Muted by ${interaction.user.tag}`;
+
+    try {
+      await targetMember.timeout(ms, reason);
+    } catch (err) {
+      console.error("Mute/timeout error:", err);
+      return interaction.editReply("❌ Failed to mute that user.");
+    }
+
+    await logModAction(client?.db, {
+      guildId: interaction.guildId,
+      targetUserId: targetUser.id,
+      targetTag: targetUser.tag,
+      moderatorUserId: interaction.user.id,
+      moderatorTag: interaction.user.tag,
+      actionType: "MUTE",
+      reason: reasonInput || null,
+      evidence: evidence || null,
+      evidenceUrls,
+      durationMs: ms,
+      expiresAt: until,
+    }).catch(() => null);
+
+    const embed = new EmbedBuilder()
+      .setColor(0xed4245)
+      .setTitle("🔇 User Muted")
+      .addFields(
+        { name: "User", value: `${targetUser.tag} (${targetUser.id})`, inline: false },
+        { name: "Moderator", value: `${interaction.user.tag} (${interaction.user.id})`, inline: false },
+        { name: "Duration", value: durationRaw, inline: true },
+        { name: "Until", value: `<t:${unix}:F> (<t:${unix}:R>)`, inline: true },
+        { name: "Reason", value: safeFieldValue(reasonInput || "No reason provided."), inline: false },
+        { name: "Evidence / Notes", value: safeFieldValue(evidence || "None"), inline: false },
+        {
+          name: "Evidence Images",
+          value: evidenceUrls.length
+            ? evidenceUrls.map((u, i) => `Image ${i + 1}: ${u}`).join("\n")
+            : "None",
+          inline: false,
+        },
+      )
+      .setTimestamp();
+
+    await sendModLog(interaction, embed);
+
+    return interaction.editReply(`✅ Muted **${targetUser.tag}** until <t:${unix}:F>.`);
+  },
+};

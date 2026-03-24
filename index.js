@@ -8,6 +8,7 @@ import {
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
+  Partials,
 } from "discord.js";
 import dotenv from "dotenv";
 import fs from "fs";
@@ -52,15 +53,14 @@ async function _trelloFetchJson(url, options) {
 async function getTrelloBlacklistListId() {
   const key = process.env.TRELLO_API_KEY;
   const token = process.env.TRELLO_TOKEN;
-
   if (!key || !token) return null;
 
   const { ok, data } = await _trelloFetchJson(
-    `https://api.trello.com/1/boards/${TRELLO_BLACKLIST_BOARD_SHORTLINK}/lists?key=${key}&token=${token}`
+    `https://api.trello.com/1/boards/${TRELLO_BLACKLIST_BOARD_SHORTLINK}/lists?key=${key}&token=${token}`,
   );
   if (!ok || !Array.isArray(data)) return null;
 
-  const list = data.find(l => _norm(l.name) === _norm(TRELLO_BLACKLIST_LIST_NAME));
+  const list = data.find((l) => _norm(l.name) === _norm(TRELLO_BLACKLIST_LIST_NAME));
   return list?.id || null;
 }
 
@@ -87,9 +87,10 @@ async function isUserBlacklistedTrello(userId) {
   const cached = trelloBlacklistCache.get(userId);
   if (cached && cached.expires > now) return cached;
 
-  // If Trello creds missing, fail open (don’t block)
   const key = process.env.TRELLO_API_KEY;
   const token = process.env.TRELLO_TOKEN;
+
+  // If Trello creds missing, fail open (don’t block)
   if (!key || !token) {
     const result = { blacklisted: false, reason: null, expires: now + TRELLO_BLACKLIST_CACHE_MS };
     trelloBlacklistCache.set(userId, result);
@@ -104,7 +105,7 @@ async function isUserBlacklistedTrello(userId) {
   }
 
   const { ok, data: cards } = await _trelloFetchJson(
-    `https://api.trello.com/1/lists/${listId}/cards?key=${key}&token=${token}`
+    `https://api.trello.com/1/lists/${listId}/cards?key=${key}&token=${token}`,
   );
 
   if (!ok || !Array.isArray(cards)) {
@@ -113,7 +114,7 @@ async function isUserBlacklistedTrello(userId) {
     return result;
   }
 
-  const card = cards.find(c => cardMatchesDiscordId(c, userId)) || null;
+  const card = cards.find((c) => cardMatchesDiscordId(c, userId)) || null;
 
   const result = {
     blacklisted: !!card,
@@ -123,6 +124,46 @@ async function isUserBlacklistedTrello(userId) {
 
   trelloBlacklistCache.set(userId, result);
   return result;
+}
+
+// ───────────────────────────────
+// ✅ Interaction-safe helpers (prevents crashes / double replies)
+// ───────────────────────────────
+async function safeReply(interaction, payload) {
+  try {
+    if (interaction.replied || interaction.deferred) {
+      return await interaction.followUp(payload);
+    }
+    return await interaction.reply(payload);
+  } catch (e) {
+    if (e?.code === 10062) return null; // Unknown Interaction
+    console.warn("⚠️ safeReply failed:", e?.code || e);
+    return null;
+  }
+}
+
+async function safeEdit(interaction, payload) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.editReply(payload);
+    }
+    return await interaction.reply(payload);
+  } catch (e) {
+    if (e?.code === 10062) return null;
+    console.warn("⚠️ safeEdit failed:", e?.code || e);
+    return null;
+  }
+}
+
+async function safeDefer(interaction, opts) {
+  try {
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.deferReply(opts);
+    }
+  } catch (e) {
+    if (e?.code === 10062) return;
+    console.warn("⚠️ safeDefer failed:", e?.code || e);
+  }
 }
 
 // ───────────────────────────────
@@ -136,7 +177,7 @@ process.on("uncaughtException", (error) => {
 });
 
 // ───────────────────────────────
-// 🧠 Client Setup
+// 🧠 Client Setup (WITH PARTIALS)
 // ───────────────────────────────
 const client = new Client({
   intents: [
@@ -145,6 +186,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
 
 client.commands = new Collection();
@@ -178,7 +220,7 @@ try {
       target_id VARCHAR(32) NOT NULL,
       payload_json JSON NOT NULL,
       status ENUM('pending','approved','denied') DEFAULT 'pending',
-      decided_by VARCHAR(32) DEFAULT NULL,
+      decided_by VARCHAR(64) DEFAULT NULL,
       decided_reason TEXT DEFAULT NULL,
       decided_at DATETIME DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -204,14 +246,18 @@ async function loadCommands(dir) {
     if (file.isDirectory()) {
       await loadCommands(filePath);
     } else if (file.name.endsWith(".js")) {
-      const module = await import(`file://${filePath}`);
-      const command = module.default;
-      if (!command?.data || !command?.execute) {
-        console.warn(`⚠️ Skipping invalid command file: ${file.name}`);
-        continue;
+      try {
+        const module = await import(`file://${filePath}`);
+        const command = module.default;
+        if (!command?.data || !command?.execute) {
+          console.warn(`⚠️ Skipping invalid command file: ${file.name}`);
+          continue;
+        }
+        client.commands.set(command.data.name, command);
+        console.log(`✅ Loaded command: ${command.data.name}`);
+      } catch (e) {
+        console.error(`❌ Failed to load ${file.name}:`, e?.message || e);
       }
-      client.commands.set(command.data.name, command);
-      console.log(`✅ Loaded command: ${command.data.name}`);
     }
   }
 }
@@ -223,10 +269,12 @@ await loadCommands(path.join(__dirname, "commands"));
 async function loadEvents() {
   const eventsPath = path.join(__dirname, "events");
   if (!fs.existsSync(eventsPath)) return;
+
   const eventFiles = fs.readdirSync(eventsPath).filter((f) => f.endsWith(".js"));
   for (const file of eventFiles) {
     const { default: event } = await import(`file://${path.join(eventsPath, file)}`);
     if (!event || !event.name) continue;
+
     event.once
       ? client.once(event.name, (...args) => event.execute(...args, client))
       : client.on(event.name, (...args) => event.execute(...args, client));
@@ -273,9 +321,7 @@ client.once("clientReady", async () => {
     status,
   });
 
-  const devLogChannel = await client.channels
-    .fetch(process.env.DEV_LOG_CHANNEL_ID)
-    .catch(() => null);
+  const devLogChannel = await client.channels.fetch(process.env.DEV_LOG_CHANNEL_ID).catch(() => null);
 
   if (devLogChannel) {
     const startupEmbed = new EmbedBuilder()
@@ -289,7 +335,7 @@ client.once("clientReady", async () => {
       .setFooter({ text: "RDUSA Bot Logging System" })
       .setTimestamp();
 
-    await devLogChannel.send({ embeds: [startupEmbed] });
+    await devLogChannel.send({ embeds: [startupEmbed] }).catch(() => null);
   }
 
   console.log("🕓 Starting Trello blacklist expiry checker...");
@@ -307,17 +353,16 @@ client.once("clientReady", async () => {
 client.on("interactionCreate", async (interaction) => {
   const db = client.db;
 
-  // ✅ QOTD Create/Edit Modal (NEW IDS)
+  // ✅ QOTD Create/Edit Modal
   if (
     interaction.isModalSubmit() &&
-    (interaction.customId === "qotd_create_modal" ||
-      interaction.customId.startsWith("qotd_edit_modal:"))
+    (interaction.customId === "qotd_create_modal" || interaction.customId.startsWith("qotd_edit_modal:"))
   ) {
     const { handleQOTDModal } = await import("./commands/utility/qotd.js");
     return handleQOTDModal(interaction, client);
   }
 
-  // ✅ QOTD Buttons (NEW IDS)
+  // ✅ QOTD Buttons
   if (interaction.isButton() && interaction.customId.startsWith("qotd_")) {
     const { handleQOTDButtons } = await import("./commands/utility/qotd.js");
     return handleQOTDButtons(interaction, client);
@@ -333,6 +378,12 @@ client.on("interactionCreate", async (interaction) => {
   if (interaction.isModalSubmit() && interaction.customId === "reportbug_modal") {
     const { handleBugModal } = await import("./commands/utility/reportbug.js");
     return handleBugModal(interaction);
+  }
+
+  // ✅ BroadcastDo Modal (VERY IMPORTANT)
+  if (interaction.isModalSubmit() && interaction.customId === "broadcastdo_modal") {
+    const { handleBroadcastDoModal } = await import("./commands/admin/broadcastdo.js");
+    return handleBroadcastDoModal(interaction, client);
   }
 
   // ✅ Request Background Check Role Modal
@@ -396,7 +447,7 @@ client.on("interactionCreate", async (interaction) => {
       console.error("Error sending to developer log channel:", err);
     }
 
-    await interaction.reply({
+    await safeReply(interaction, {
       content: "✅ Your **Background Check Role** request has been submitted.",
       flags: 64,
     });
@@ -404,51 +455,69 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  // ✅ Edit-Embed Modal (for /editembed)  ✅ NEW HANDLER
+  // ✅ Edit-Embed Modal (new + legacy)
   if (interaction.isModalSubmit() && interaction.customId.startsWith("editembed_modal:")) {
     const { handleEditEmbedModal } = await import("./commands/Management/editembed.js");
     return handleEditEmbedModal(interaction, client);
   }
-
-  // ✅ Edit-Embed Modal (legacy ids you used earlier)
   if (interaction.isModalSubmit() && interaction.customId.startsWith("editembed:")) {
     const { handleEditEmbedModal } = await import("./commands/Management/editembed.js");
     return handleEditEmbedModal(interaction, client);
   }
 
   // ─────────────────────────────────────────────
-  // ✅ PERSISTENT COMMISSION DENY MODAL (Discord-only)
-  // customId format: commission_deny_modal:<messageId>
+  // ✅ COMMISSION REVOKE MODAL
+  // customId format: commission_revoke_modal:<messageId>
   // ─────────────────────────────────────────────
-  if (interaction.isModalSubmit() && interaction.customId.startsWith("commission_deny_modal:")) {
-    if (!db)
-      return interaction
-        .reply({ content: "❌ Database not available.", flags: 64 })
-        .catch(() => null);
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("commission_revoke_modal:")) {
+    if (!db) return safeReply(interaction, { content: "❌ Database not available.", flags: 64 });
 
     const messageId = interaction.customId.split(":")[1];
-    const denyReason = interaction.fields.getTextInputValue("deny_reason");
+    const denyReason = interaction.fields.getTextInputValue("deny_reason")?.trim() || "No reason provided.";
+
+    // Load allowed revoke roles for THIS guild from SQL
+    // Expected table: guild_commission_revoke_perms(guild_id, role_id, enabled)
+    const guildId = interaction.guild?.id;
+    if (!guildId) return safeReply(interaction, { content: "❌ This can only be used in a server.", flags: 64 });
+
+    const modalMember = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    if (!modalMember) return safeReply(interaction, { content: "❌ Could not load your member profile.", flags: 64 });
+
+    let canRevoke = false;
+    try {
+      const [permRows] = await db.query(
+        "SELECT role_id FROM guild_commission_revoke_perms WHERE guild_id=? AND enabled=1",
+        [guildId],
+      );
+      const allowedRoleIds = (permRows || []).map((r) => String(r.role_id)).filter(Boolean);
+      canRevoke = allowedRoleIds.length
+        ? modalMember.roles.cache.some((r) => allowedRoleIds.includes(r.id))
+        : false;
+    } catch (e) {
+      console.error("❌ commission revoke perms SQL error:", e);
+      canRevoke = false;
+    }
+
+    if (!canRevoke) {
+      return safeReply(interaction, { content: "🚫 You are not authorized to revoke approvals.", flags: 64 });
+    }
 
     const [rows] = await db.query(
       "SELECT * FROM discord_requests WHERE type='commission' AND message_id=? LIMIT 1",
       [messageId],
     );
-
     if (!rows.length) {
-      return interaction
-        .reply({ content: "❌ Request not found in database.", flags: 64 })
-        .catch(() => null);
+      return safeReply(interaction, { content: "❌ Request not found in database.", flags: 64 });
     }
 
     const req = rows[0];
-    if (req.status !== "pending") {
-      return interaction
-        .reply({ content: "⚠️ This request was already processed.", flags: 64 })
-        .catch(() => null);
+
+    if (req.status !== "approved") {
+      return safeReply(interaction, { content: "⚠️ This request is not approved (nothing to revoke).", flags: 64 });
     }
 
     await db.query(
-      "UPDATE discord_requests SET status='denied', decided_by=?, decided_reason=?, decided_at=NOW() WHERE message_id=? AND status='pending'",
+      "UPDATE discord_requests SET status='denied', decided_by=?, decided_reason=?, decided_at=NOW() WHERE message_id=?",
       [interaction.user.id, denyReason, messageId],
     );
 
@@ -456,151 +525,128 @@ client.on("interactionCreate", async (interaction) => {
     const msg = ch ? await ch.messages.fetch(req.message_id).catch(() => null) : null;
 
     if (msg?.embeds?.[0]) {
-      const deniedEmbed = EmbedBuilder.from(msg.embeds[0])
-        .setColor(0xed4245)
-        .setFooter({ text: `Denied • ${new Date().toLocaleString()}` });
+      const revokedEmbed = EmbedBuilder.from(msg.embeds[0]).setColor(0xed4245);
 
-      const fields = deniedEmbed.data.fields ?? [];
+      const fields = revokedEmbed.data.fields ?? [];
       const statusIndex = fields.findIndex((f) => f.name?.toLowerCase() === "status");
+      const approvedByIndex = fields.findIndex((f) => f.name?.toLowerCase() === "approved by");
+
+      const statusValue = `❌ Approval Revoked by ${interaction.user.tag}\n**Reason:** ${denyReason}`;
 
       if (statusIndex !== -1) {
-        deniedEmbed.spliceFields(statusIndex, 1, {
-          name: "Status",
-          value: `❌ Denied by ${interaction.user.tag}\n**Reason:** ${denyReason}`,
-          inline: false,
-        });
+        revokedEmbed.spliceFields(statusIndex, 1, { name: "Status", value: statusValue, inline: false });
       } else {
-        deniedEmbed.addFields({
-          name: "Status",
-          value: `❌ Denied by ${interaction.user.tag}\n**Reason:** ${denyReason}`,
-          inline: false,
-        });
+        revokedEmbed.addFields({ name: "Status", value: statusValue, inline: false });
       }
 
-      await msg.edit({ embeds: [deniedEmbed], components: [] }).catch(() => null);
+      if (approvedByIndex === -1) {
+        revokedEmbed.addFields({ name: "Approved By", value: "RDUSA | Operations", inline: false });
+      }
+
+      revokedEmbed.setFooter({ text: `Revoked • ${new Date().toLocaleString()}` });
+
+      await msg.edit({ embeds: [revokedEmbed], components: [] }).catch(() => null);
     }
 
-    return interaction
-      .reply({ content: "❌ Request denied and buttons removed.", flags: 64 })
-      .catch(() => null);
+    // DM requester about revoke (best-effort)
+    try {
+      const requester = await client.users.fetch(req.requester_id).catch(() => null);
+      if (requester) {
+        const jump = `https://discord.com/channels/${req.guild_id}/${req.channel_id}/${req.message_id}`;
+        const dmEmbed = new EmbedBuilder()
+          .setColor(0xed4245)
+          .setTitle("❌ Commission Request Revoked")
+          .setDescription(`Your commission request approval was **revoked**.\n\n**View Request:** ${jump}`)
+          .addFields({ name: "Reason", value: denyReason })
+          .setFooter({
+            text: `User ID: ${req.target_id} • Request ID: ${req.id} • ${new Date().toLocaleString()}`,
+          })
+          .setTimestamp();
+
+        await requester.send({ embeds: [dmEmbed] }).catch(() => null);
+      }
+    } catch (_) {}
+
+    return safeReply(interaction, { content: "❌ Approval revoked and logged.", flags: 64 });
   }
 
   // ─────────────────────────────────────────────
-  // ✅ PERSISTENT COMMISSION BUTTONS (Discord-only)
-  // customId format: commission_accept:<messageId> OR commission_deny:<messageId>
+  // ✅ COMMISSION BUTTONS (ONLY REVOKE IS EXPECTED NOW)
+  // customId format: commission_revoke:<messageId>
   // ─────────────────────────────────────────────
-  const APPROVED_ROLES = [
-    "1332198216560541696",
-    "1378460548844486776",
-    "1389056453486051439",
-    "1332198329899286633",
-    "1332198334135275620",
-    "1332198337977389088",
-    "1332198340288577589",
-    "1332200411586887760",
-    "1332198672720723988",
-    "1347449287046336563",
-    "1347451565623218206",
-    "1347451569372926022",
-    "1347717557674573865",
-    "1347721442392805396",
-    "1347452419230928897",
-    "1347452417595277404",
-  ];
+  if (interaction.isButton() && interaction.customId.startsWith("commission_revoke:")) {
+    if (!db) return safeReply(interaction, { content: "❌ Database not available.", flags: 64 });
 
-  if (interaction.isButton() && interaction.customId.startsWith("commission_")) {
-    if (!db)
-      return interaction
-        .reply({ content: "❌ Database not available.", flags: 64 })
-        .catch(() => null);
-
-    const member = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
-    const isAuthorized = member?.roles?.cache?.some((r) => APPROVED_ROLES.includes(r.id));
-
-    if (!isAuthorized) {
-      return interaction
-        .reply({ content: "🚫 You are not authorized to manage this request.", flags: 64 })
-        .catch(() => null);
-    }
-
-    const [action, messageId] = interaction.customId.split(":");
+    const parts = interaction.customId.split(":");
+    const messageId = parts[1];
     if (!messageId) {
-      return interaction
-        .reply({ content: "❌ Invalid button payload.", flags: 64 })
-        .catch(() => null);
+      return safeReply(interaction, { content: "❌ Invalid button payload.", flags: 64 });
     }
 
+    // Verify request exists
     const [rows] = await db.query(
       "SELECT * FROM discord_requests WHERE type='commission' AND message_id=? LIMIT 1",
       [messageId],
     );
-
     if (!rows.length) {
-      return interaction
-        .reply({ content: "❌ Request not found in database.", flags: 64 })
-        .catch(() => null);
+      return safeReply(interaction, { content: "❌ Request not found in database.", flags: 64 });
     }
 
     const req = rows[0];
 
-    // Already processed -> remove buttons if still present
-    if (req.status !== "pending") {
+    // If already denied -> remove buttons quietly
+    if (req.status === "denied") {
       await interaction.deferUpdate().catch(() => null);
       await interaction.message.edit({ components: [] }).catch(() => null);
       return;
     }
 
-    // ✅ APPROVE
-    if (action === "commission_accept") {
+    // Only allow revoke if approved
+    if (req.status !== "approved") {
       await interaction.deferUpdate().catch(() => null);
-
-      await db.query(
-        "UPDATE discord_requests SET status='approved', decided_by=?, decided_at=NOW() WHERE message_id=? AND status='pending'",
-        [interaction.user.id, messageId],
-      );
-
-      const approvedEmbed = interaction.message?.embeds?.[0]
-        ? EmbedBuilder.from(interaction.message.embeds[0]).setColor(0x57f287)
-        : new EmbedBuilder().setColor(0x57f287);
-
-      const fields = approvedEmbed.data.fields ?? [];
-      const statusIndex = fields.findIndex((f) => f.name?.toLowerCase() === "status");
-
-      if (statusIndex !== -1) {
-        approvedEmbed.spliceFields(statusIndex, 1, {
-          name: "Status",
-          value: `✅ Approved by ${interaction.user.tag}`,
-          inline: false,
-        });
-      } else {
-        approvedEmbed.addFields({
-          name: "Status",
-          value: `✅ Approved by ${interaction.user.tag}`,
-          inline: false,
-        });
-      }
-
-      approvedEmbed.setFooter({ text: `Approved • ${new Date().toLocaleString()}` });
-
-      await interaction.message.edit({ embeds: [approvedEmbed], components: [] }).catch(() => null);
+      await interaction.message.edit({ components: [] }).catch(() => null);
       return;
     }
 
-    // ❌ DENY -> open modal (persistent)
-    if (action === "commission_deny") {
-      const modal = new ModalBuilder()
-        .setCustomId(`commission_deny_modal:${messageId}`)
-        .setTitle("Deny Commission Request");
+    // Role gate: guild_commission_revoke_perms
+    const guildId = interaction.guild?.id;
+    if (!guildId) return safeReply(interaction, { content: "❌ This can only be used in a server.", flags: 64 });
 
-      const reasonInput = new TextInputBuilder()
-        .setCustomId("deny_reason")
-        .setLabel("Reason for Denial")
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true);
+    const btnMember = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    if (!btnMember) return safeReply(interaction, { content: "❌ Could not load your member profile.", flags: 64 });
 
-      modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
-      return interaction.showModal(modal).catch(() => null);
+    let canRevoke = false;
+    try {
+      const [permRows] = await db.query(
+        "SELECT role_id FROM guild_commission_revoke_perms WHERE guild_id=? AND enabled=1",
+        [guildId],
+      );
+      const allowedRoleIds = (permRows || []).map((r) => String(r.role_id)).filter(Boolean);
+      canRevoke = allowedRoleIds.length
+        ? btnMember.roles.cache.some((r) => allowedRoleIds.includes(r.id))
+        : false;
+    } catch (e) {
+      console.error("❌ commission revoke perms SQL error:", e);
+      canRevoke = false;
     }
+
+    if (!canRevoke) {
+      return safeReply(interaction, { content: "🚫 You are not authorized to revoke approvals.", flags: 64 });
+    }
+
+    // Open modal for reason
+    const modal = new ModalBuilder()
+      .setCustomId(`commission_revoke_modal:${messageId}`)
+      .setTitle("Revoke Approval");
+
+    const reasonInput = new TextInputBuilder()
+      .setCustomId("deny_reason")
+      .setLabel("Reason for Revoking Approval")
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
+    return interaction.showModal(modal).catch(() => null);
   }
 
   // ─── Slash Commands ───
@@ -610,14 +656,12 @@ client.on("interactionCreate", async (interaction) => {
   const BOT_OWNER_ID = "238058962711216130";
   const MAINT_OVERRIDE_ROLE_ID = "1442276596558987446";
 
-  const member =
+  const cmdMember =
     interaction.member ??
-    (interaction.guild
-      ? await interaction.guild.members.fetch(interaction.user.id).catch(() => null)
-      : null);
+    (interaction.guild ? await interaction.guild.members.fetch(interaction.user.id).catch(() => null) : null);
 
   const isOwner = interaction.user.id === BOT_OWNER_ID;
-  const hasOverrideRole = member?.roles?.cache?.has(MAINT_OVERRIDE_ROLE_ID) ?? false;
+  const hasOverrideRole = cmdMember?.roles?.cache?.has(MAINT_OVERRIDE_ROLE_ID) ?? false;
 
   const isMaintenanceBypass = isOwner || hasOverrideRole;
   interaction.isMaintenanceBypass = isMaintenanceBypass;
@@ -626,7 +670,7 @@ client.on("interactionCreate", async (interaction) => {
   try {
     if (db) {
       const [settingsRows] = await db.query("SELECT maintenance FROM bot_settings LIMIT 1;");
-      const maintenanceStatus = settingsRows[0]?.maintenance || "off";
+      const maintenanceStatus = settingsRows?.[0]?.maintenance || "off";
       maintenanceOn = maintenanceStatus === "on";
     }
   } catch (err) {
@@ -634,7 +678,7 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (maintenanceOn && !isMaintenanceBypass) {
-    return interaction.reply({
+    return safeReply(interaction, {
       content: "🛠️ The bot is currently in **maintenance mode**.\nPlease try again later.",
       flags: 64,
     });
@@ -642,14 +686,11 @@ client.on("interactionCreate", async (interaction) => {
 
   // 🚫 Global Blacklist Check (Trello-based)
   try {
-    // allow owner bypass
     if (!isOwner) {
-      // always allow /blacklist so you can remove people
       if (interaction.commandName !== "blacklist") {
         const result = await isUserBlacklistedTrello(interaction.user.id);
-
         if (result.blacklisted) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content:
               "🚫 You are blacklisted from using this bot." +
               (result.reason ? `\n**Reason:** ${result.reason}` : ""),
@@ -666,23 +707,10 @@ client.on("interactionCreate", async (interaction) => {
   if (!command) return;
 
   // 🧱 Bot-owner-only commands that the override role must NOT use
-  const OWNER_ONLY_COMMANDS = [
-    "blacklist",
-    "eval",
-    "maintenance",
-    "owner",
-    "reload",
-    "setstatus",
-    "shutdown",
-  ];
+  const OWNER_ONLY_COMMANDS = ["blacklist", "eval", "maintenance", "owner", "reload", "setstatus", "shutdown"];
 
-  if (
-    maintenanceOn &&
-    hasOverrideRole &&
-    !isOwner &&
-    OWNER_ONLY_COMMANDS.includes(interaction.commandName)
-  ) {
-    return interaction.reply({
+  if (maintenanceOn && hasOverrideRole && !isOwner && OWNER_ONLY_COMMANDS.includes(interaction.commandName)) {
+    return safeReply(interaction, {
       content: "🚫 This command is restricted to the bot owner, even while maintenance mode is active.",
       flags: 64,
     });
@@ -695,11 +723,24 @@ client.on("interactionCreate", async (interaction) => {
     console.log(`✅ ${interaction.user.tag} used /${interaction.commandName} (${latency}ms)`);
   } catch (error) {
     console.error(`❌ Error executing /${interaction.commandName}:`, error);
-    if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({
-        content: "❌ There was an error executing that command.",
-        flags: 64,
-      });
+
+    // ✅ If the interaction expired (10062), don't crash or try to reply again
+    if (error?.code === 10062) return;
+
+    // ✅ Don't let reply/editReply failures crash the bot
+    try {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: "❌ There was an error executing that command.",
+          flags: 64,
+        });
+      } else {
+        await interaction.editReply({
+          content: "❌ There was an error executing that command.",
+        });
+      }
+    } catch (replyErr) {
+      console.warn("⚠️ Failed to send error response:", replyErr?.code || replyErr);
     }
   }
 });

@@ -1,0 +1,160 @@
+import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
+import { logModAction } from "../../utils/modActionLogger.js";
+
+const OWNER_ID = "238058962711216130";
+
+const ALLOWED_ROLE_IDS = [
+  "1347735054822015090",
+  "1369065942243344464",
+  "1369877362224664647",
+  "1332197345403605123",
+  "1332198672720723988",
+];
+
+const MOD_LOG_CHANNEL_ID = process.env.MOD_LOG_CHANNEL_ID || null;
+
+function hasModPerms(member) {
+  if (!member) return false;
+  if (member.id === OWNER_ID) return true;
+  return member.roles?.cache?.some((r) => ALLOWED_ROLE_IDS.includes(r.id)) ?? false;
+}
+
+function isImageAttachment(att) {
+  if (!att) return false;
+  const ct = (att.contentType || "").toLowerCase();
+  if (ct.startsWith("image/")) return true;
+  const name = (att.name || "").toLowerCase();
+  return [".png", ".jpg", ".jpeg", ".gif", ".webp"].some((ext) => name.endsWith(ext));
+}
+
+function safeFieldValue(str, max = 1024) {
+  if (!str) return "None";
+  const s = String(str);
+  return s.length > max ? s.slice(0, max - 3) + "..." : s;
+}
+
+async function sendModLog(interaction, embed) {
+  if (!MOD_LOG_CHANNEL_ID) return;
+  const ch = await interaction.client.channels.fetch(MOD_LOG_CHANNEL_ID).catch(() => null);
+  if (ch?.isTextBased?.()) await ch.send({ embeds: [embed] }).catch(() => null);
+}
+
+export default {
+  data: new SlashCommandBuilder()
+    .setName("editwarn")
+    .setDescription("Add an edit note / evidence to an existing warning case (audit trail).")
+    .addIntegerOption((opt) =>
+      opt.setName("case_id").setDescription("Case ID from /history").setRequired(true),
+    )
+    .addStringOption((opt) =>
+      opt.setName("new_reason").setDescription("Updated reason (optional)").setRequired(false),
+    )
+    .addStringOption((opt) =>
+      opt.setName("evidence").setDescription("Evidence / notes to add (optional)").setRequired(false),
+    )
+    .addAttachmentOption((opt) =>
+      opt.setName("image1").setDescription("Optional evidence image").setRequired(false),
+    )
+    .addAttachmentOption((opt) =>
+      opt.setName("image2").setDescription("Optional evidence image").setRequired(false),
+    )
+    .addAttachmentOption((opt) =>
+      opt.setName("image3").setDescription("Optional evidence image").setRequired(false),
+    ),
+
+  async execute(interaction, client) {
+    const invoker = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+    if (!hasModPerms(invoker)) return interaction.reply({ content: "🚫 You are not authorized.", flags: 64 });
+    if (!interaction.inGuild()) return interaction.reply({ content: "❌ Server-only command.", flags: 64 });
+
+    const db = client?.db;
+    if (!db) return interaction.reply({ content: "❌ Database not available.", flags: 64 });
+
+    await interaction.deferReply({ flags: 64 });
+
+    const caseId = interaction.options.getInteger("case_id", true);
+    const newReason = interaction.options.getString("new_reason")?.trim() || null;
+    const evidence = interaction.options.getString("evidence")?.trim() || null;
+
+    const atts = [
+      interaction.options.getAttachment("image1"),
+      interaction.options.getAttachment("image2"),
+      interaction.options.getAttachment("image3"),
+    ].filter(Boolean);
+
+    for (const att of atts) {
+      if (!isImageAttachment(att)) {
+        return interaction.editReply(
+          `❌ Attachment **${att.name || "file"}** is not a supported image type (png/jpg/gif/webp).`,
+        );
+      }
+    }
+    const evidenceUrls = atts.map((a) => a.url);
+
+    // Fetch original case to ensure it exists and is WARN
+    let original = null;
+    try {
+      const [rows] = await db.query(
+        `
+        SELECT id, action_type, target_user_id, target_tag, reason
+        FROM mod_actions
+        WHERE guild_id = ? AND id = ?
+        LIMIT 1
+        `,
+        [interaction.guildId, caseId],
+      );
+      original = rows?.[0] || null;
+    } catch (err) {
+      console.error("editwarn lookup error:", err);
+      return interaction.editReply("❌ Failed to locate that case.");
+    }
+
+    if (!original) return interaction.editReply("❌ No case found with that ID.");
+    if (String(original.action_type).toUpperCase() !== "WARN") {
+      return interaction.editReply("❌ That case is not a WARN entry. Use /history to find the warning case ID.");
+    }
+
+    // ✅ Log the edit as a new action (audit trail)
+    const editReasonText =
+      `Edited Case #${caseId}` +
+      (newReason ? ` | New Reason: ${newReason}` : "") +
+      (original.reason ? ` | Old Reason: ${original.reason}` : "");
+
+    await logModAction(db, {
+      guildId: interaction.guildId,
+      targetUserId: original.target_user_id,
+      targetTag: original.target_tag || null,
+      moderatorUserId: interaction.user.id,
+      moderatorTag: interaction.user.tag,
+      actionType: "EDITWARN",
+      reason: editReasonText,
+      evidence,
+      evidenceUrls,
+      durationMs: null,
+      expiresAt: null,
+    }).catch(() => null);
+
+    const embed = new EmbedBuilder()
+      .setColor(0x2b6cb0)
+      .setTitle("📝 Warning Updated (Audit Trail)")
+      .addFields(
+        { name: "Case Edited", value: `#${caseId}`, inline: true },
+        { name: "Target User ID", value: `${original.target_user_id}`, inline: true },
+        { name: "Moderator", value: `${interaction.user.tag} (${interaction.user.id})`, inline: false },
+        { name: "New Reason", value: safeFieldValue(newReason || "No change"), inline: false },
+        { name: "Evidence / Notes Added", value: safeFieldValue(evidence || "None"), inline: false },
+        {
+          name: "Evidence Images",
+          value: evidenceUrls.length
+            ? evidenceUrls.map((u, i) => `Image ${i + 1}: ${u}`).join("\n")
+            : "None",
+          inline: false,
+        },
+      )
+      .setTimestamp();
+
+    await sendModLog(interaction, embed);
+
+    return interaction.editReply(`✅ Updated warning case **#${caseId}** (logged as an audit entry).`);
+  },
+};

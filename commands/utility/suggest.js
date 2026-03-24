@@ -22,12 +22,7 @@ export default {
       .setCustomId("suggest_modal")
       .setTitle("Submit a Suggestion");
 
-    const usernameInput = new TextInputBuilder()
-      .setCustomId("suggest_username")
-      .setLabel("Username")
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder("Enter your Roblox or Discord username")
-      .setRequired(true);
+    // ✅ Removed username field — bot will fill automatically
 
     const suggestionInput = new TextInputBuilder()
       .setCustomId("suggest_text")
@@ -43,13 +38,11 @@ export default {
       .setPlaceholder("Explain the reason behind your suggestion")
       .setRequired(true);
 
-    const rows = [
-      new ActionRowBuilder().addComponents(usernameInput),
+    modal.addComponents(
       new ActionRowBuilder().addComponents(suggestionInput),
       new ActionRowBuilder().addComponents(reasonInput),
-    ];
+    );
 
-    modal.addComponents(rows);
     await interaction.showModal(modal);
   },
 };
@@ -60,9 +53,11 @@ export default {
 export async function handleSuggestModal(interaction) {
   if (interaction.customId !== "suggest_modal") return;
 
-  await interaction.deferReply({ flags: 64 });
+  await interaction.deferReply({ flags: 64 }).catch(() => null);
 
-  const username = interaction.fields.getTextInputValue("suggest_username");
+  // ✅ Auto-fill username: Discord tag (and ID is logged separately)
+  const username = interaction.user.tag;
+
   const suggestion = interaction.fields.getTextInputValue("suggest_text");
   const reason = interaction.fields.getTextInputValue("suggest_reason");
 
@@ -72,29 +67,25 @@ export async function handleSuggestModal(interaction) {
 
     // Get lists
     const listsRes = await fetch(
-      `https://api.trello.com/1/boards/${boardId}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+      `https://api.trello.com/1/boards/${boardId}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
     );
     const lists = await listsRes.json();
 
-    const targetList = lists.find(
-      (l) => l.name.toLowerCase() === "new suggestions"
-    );
+    const targetList = lists.find((l) => l.name?.toLowerCase() === "new suggestions");
 
     if (!targetList) {
-      return interaction.editReply(
-        "❌ Could not find the **New Suggestions** list on Trello."
-      );
+      return interaction
+        .editReply("❌ Could not find the **New Suggestions** list on Trello.")
+        .catch(() => null);
     }
 
     // Get "Awaiting Review" label
     const labelsRes = await fetch(
-      `https://api.trello.com/1/boards/${boardId}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+      `https://api.trello.com/1/boards/${boardId}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
     );
     const labels = await labelsRes.json();
 
-    const awaitingLabel = labels.find(
-      (l) => l.name.toLowerCase() === "awaiting review"
-    );
+    const awaitingLabel = labels.find((l) => l.name?.toLowerCase() === "awaiting review");
 
     // Clean suggestion title (Trello max name length = 163)
     let cardTitle = suggestion.trim();
@@ -111,7 +102,7 @@ export async function handleSuggestModal(interaction) {
     // Create the Trello card
     const cardBody = {
       idList: targetList.id,
-      name: cardTitle, // <── THIS IS NOW THE SUGGESTION
+      name: cardTitle,
       desc,
       idLabels: awaitingLabel ? [awaitingLabel.id] : [],
     };
@@ -122,11 +113,11 @@ export async function handleSuggestModal(interaction) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(cardBody),
-      }
+      },
     );
 
     if (!cardRes.ok) {
-      const errTxt = await cardRes.text();
+      const errTxt = await cardRes.text().catch(() => "");
       throw new Error(`Trello Error: ${errTxt}`);
     }
 
@@ -137,31 +128,28 @@ export async function handleSuggestModal(interaction) {
       .setColor(0x57f287)
       .setTitle("💡 Suggestion Submitted")
       .setDescription(
-        `Your suggestion has been submitted successfully.\n\n**Card:** [${cardTitle}](${card.url})`
+        `Your suggestion has been submitted successfully.\n\n**Card:** [${cardTitle}](${card.url})`,
       )
       .addFields(
         {
           name: "Suggestion",
-          value:
-            suggestion.length > 1024
-              ? `${suggestion.slice(0, 1021)}...`
-              : suggestion,
+          value: suggestion.length > 1024 ? `${suggestion.slice(0, 1021)}...` : suggestion,
         },
         {
           name: "Reason",
-          value:
-            reason.length > 1024 ? `${reason.slice(0, 1021)}...` : reason,
-        }
+          value: reason.length > 1024 ? `${reason.slice(0, 1021)}...` : reason,
+        },
       )
       .setFooter({ text: "Status: Awaiting Review" })
       .setTimestamp();
 
-    await interaction.editReply({ embeds: [embed] });
-
+    await interaction.editReply({ embeds: [embed] }).catch(() => null);
   } catch (err) {
     console.error("❌ Error submitting suggestion:", err);
-    await interaction.editReply({
-      content: "❌ There was an error submitting your suggestion to Trello.",
-    });
+    await interaction
+      .editReply({
+        content: "❌ There was an error submitting your suggestion to Trello.",
+      })
+      .catch(() => null);
   }
 }

@@ -1,0 +1,129 @@
+import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
+import { logModAction } from "../../utils/modActionLogger.js";
+
+const OWNER_ID = "238058962711216130";
+
+const ALLOWED_ROLE_IDS = [
+  "1347735054822015090",
+  "1369065942243344464",
+  "1369877362224664647",
+  "1332197345403605123",
+  "1332198672720723988",
+];
+
+const MOD_LOG_CHANNEL_ID = process.env.MOD_LOG_CHANNEL_ID || null;
+
+function hasModPerms(member) {
+  if (!member) return false;
+  if (member.id === OWNER_ID) return true;
+  return member.roles?.cache?.some((r) => ALLOWED_ROLE_IDS.includes(r.id)) ?? false;
+}
+
+function isImageAttachment(att) {
+  if (!att) return false;
+  const ct = (att.contentType || "").toLowerCase();
+  if (ct.startsWith("image/")) return true;
+  const name = (att.name || "").toLowerCase();
+  return [".png", ".jpg", ".jpeg", ".gif", ".webp"].some((ext) => name.endsWith(ext));
+}
+
+function safeFieldValue(str, max = 1024) {
+  if (!str) return "None";
+  const s = String(str);
+  return s.length > max ? s.slice(0, max - 3) + "..." : s;
+}
+
+async function sendModLog(interaction, embed) {
+  if (!MOD_LOG_CHANNEL_ID) return;
+  const ch = await interaction.client.channels.fetch(MOD_LOG_CHANNEL_ID).catch(() => null);
+  if (ch?.isTextBased?.()) await ch.send({ embeds: [embed] }).catch(() => null);
+}
+
+export default {
+  data: new SlashCommandBuilder()
+    .setName("warn")
+    .setDescription("Warn a user.")
+    .addUserOption((opt) => opt.setName("user").setDescription("User to warn").setRequired(true))
+    .addStringOption((opt) => opt.setName("reason").setDescription("Reason for the warning").setRequired(true))
+    .addStringOption((opt) => opt.setName("evidence").setDescription("Evidence / notes (optional)").setRequired(false))
+    .addAttachmentOption((opt) => opt.setName("image1").setDescription("Optional evidence image").setRequired(false))
+    .addAttachmentOption((opt) => opt.setName("image2").setDescription("Optional evidence image").setRequired(false))
+    .addAttachmentOption((opt) => opt.setName("image3").setDescription("Optional evidence image").setRequired(false)),
+
+  async execute(interaction, client) {
+    if (!interaction.inGuild()) {
+      return interaction.reply({ content: "❌ This command can only be used in a server.", flags: 64 }).catch(() => null);
+    }
+
+    // ✅ ACK IMMEDIATELY (prevents 10062)
+    if (!interaction.deferred && !interaction.replied) {
+      await interaction.deferReply({ flags: 64 }).catch(() => null);
+    }
+
+    // ✅ Now do slower stuff
+    const invoker =
+      interaction.member ??
+      (await interaction.guild.members.fetch(interaction.user.id).catch(() => null));
+
+    if (!hasModPerms(invoker)) {
+      return interaction.editReply("🚫 You are not authorized.").catch(() => null);
+    }
+
+    const target = interaction.options.getUser("user", true);
+    const reason = interaction.options.getString("reason", true).trim();
+    const evidence = interaction.options.getString("evidence")?.trim() || null;
+
+    const atts = [
+      interaction.options.getAttachment("image1"),
+      interaction.options.getAttachment("image2"),
+      interaction.options.getAttachment("image3"),
+    ].filter(Boolean);
+
+    for (const att of atts) {
+      if (!isImageAttachment(att)) {
+        return interaction.editReply(
+          `❌ Attachment **${att.name || "file"}** is not a supported image type (png/jpg/gif/webp).`,
+        ).catch(() => null);
+      }
+    }
+
+    const evidenceUrls = atts.map((a) => a.url);
+
+    // ✅ SQL log (never breaks)
+    await logModAction(client?.db, {
+      guildId: interaction.guildId,
+      targetUserId: target.id,
+      targetTag: target.tag,
+      moderatorUserId: interaction.user.id,
+      moderatorTag: interaction.user.tag,
+      actionType: "WARN",
+      reason,
+      evidence,
+      evidenceUrls,
+      durationMs: null,
+      expiresAt: null,
+    }).catch(() => null);
+
+    const embed = new EmbedBuilder()
+      .setColor(0xffd32a)
+      .setTitle("⚠️ Warning Issued")
+      .addFields(
+        { name: "User", value: `${target.tag} (${target.id})`, inline: false },
+        { name: "Moderator", value: `${interaction.user.tag} (${interaction.user.id})`, inline: false },
+        { name: "Reason", value: safeFieldValue(reason), inline: false },
+        { name: "Evidence / Notes", value: safeFieldValue(evidence || "None"), inline: false },
+        {
+          name: "Evidence Images",
+          value: evidenceUrls.length
+            ? evidenceUrls.map((u, i) => `Image ${i + 1}: ${u}`).join("\n")
+            : "None",
+          inline: false,
+        },
+      )
+      .setTimestamp();
+
+    await sendModLog(interaction, embed);
+
+    return interaction.editReply(`✅ Warned **${target.tag}**.`).catch(() => null);
+  },
+};

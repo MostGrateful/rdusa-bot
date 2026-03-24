@@ -1,0 +1,182 @@
+// commands/moderation/history.js
+import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
+
+const OWNER_ID = "238058962711216130";
+
+const ALLOWED_ROLE_IDS = [
+  "1347735054822015090",
+  "1369065942243344464",
+  "1369877362224664647",
+  "1332197345403605123",
+  "1332198672720723988",
+];
+
+function hasModPerms(member) {
+  if (!member) return false;
+  if (member.id === OWNER_ID) return true;
+  return member.roles?.cache?.some((r) => ALLOWED_ROLE_IDS.includes(r.id)) ?? false;
+}
+
+function unix(date) {
+  if (!date) return null;
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return null;
+  return Math.floor(d.getTime() / 1000);
+}
+
+function fmtTs(date) {
+  const u = unix(date);
+  return u ? `<t:${u}:F> (<t:${u}:R>)` : "Unknown";
+}
+
+/**
+ * Try to pull warnings from DB with unknown schema.
+ * We attempt common table/column patterns.
+ */
+async function getWarningsSafe(db, userId, limit = 10) {
+  if (!db) return { ok: false, rows: [], why: "db_not_available" };
+
+  const queries = [
+    // common: warnings(user_id, reason, moderator_id, created_at)
+    {
+      sql: `
+        SELECT id, user_id, reason, moderator_id, created_at
+        FROM warnings
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `,
+      params: [userId, limit],
+      mapper: (r) => ({
+        id: r.id ?? null,
+        reason: r.reason ?? null,
+        mod: r.moderator_id ?? null,
+        at: r.created_at ?? null,
+      }),
+    },
+    // common alt: warnings(userId, reason, modId, timestamp)
+    {
+      sql: `
+        SELECT id, userId, reason, modId, timestamp
+        FROM warnings
+        WHERE userId = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `,
+      params: [userId, limit],
+      mapper: (r) => ({
+        id: r.id ?? null,
+        reason: r.reason ?? null,
+        mod: r.modId ?? null,
+        at: r.timestamp ?? null,
+      }),
+    },
+    // alt table name
+    {
+      sql: `
+        SELECT id, user_id, reason, added_by, added_at
+        FROM mod_warnings
+        WHERE user_id = ?
+        ORDER BY added_at DESC
+        LIMIT ?
+      `,
+      params: [userId, limit],
+      mapper: (r) => ({
+        id: r.id ?? null,
+        reason: r.reason ?? null,
+        mod: r.added_by ?? null,
+        at: r.added_at ?? null,
+      }),
+    },
+  ];
+
+  for (const q of queries) {
+    try {
+      const [rows] = await db.query(q.sql, q.params);
+      if (!Array.isArray(rows)) continue;
+      return { ok: true, rows: rows.map(q.mapper), why: null };
+    } catch {
+      // try next
+    }
+  }
+
+  return { ok: false, rows: [], why: "schema_unknown" };
+}
+
+export default {
+  data: new SlashCommandBuilder()
+    .setName("history")
+    .setDescription("View a member's moderation history (warnings record).")
+    .addUserOption((opt) =>
+      opt.setName("user").setDescription("User to view history for").setRequired(true),
+    ),
+
+  async execute(interaction, client) {
+    const invoker = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+    if (!hasModPerms(invoker)) {
+      return interaction.reply({ content: "🚫 You are not authorized to use this command.", flags: 64 });
+    }
+
+    if (!interaction.inGuild()) {
+      return interaction.reply({ content: "❌ This command can only be used in a server.", flags: 64 });
+    }
+
+    await interaction.deferReply({ flags: 64 });
+
+    const targetUser = interaction.options.getUser("user", true);
+    const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+
+    // Pull warnings (best-effort)
+    const db = client?.db;
+    const warnings = await getWarningsSafe(db, targetUser.id, 10);
+
+    let warningsText = "No data.";
+    if (warnings.ok) {
+      if (!warnings.rows.length) warningsText = "None.";
+      else {
+        warningsText = warnings.rows
+          .map((w, idx) => {
+            const when = fmtTs(w.at);
+            const mod = w.mod ? `<@${w.mod}>` : "Unknown";
+            const reason = w.reason ? String(w.reason).slice(0, 180) : "No reason";
+            const idPart = w.id !== null ? `#${w.id}` : `#${idx + 1}`;
+            return `**${idPart}** • ${when}\nMod: ${mod}\nReason: ${reason}`;
+          })
+          .join("\n\n");
+      }
+    } else {
+      warningsText =
+        warnings.why === "db_not_available"
+          ? "N/A (Database not available)."
+          : "N/A (Warnings table/schema not recognized).";
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(`Moderation History — ${targetUser.tag}`)
+      .setThumbnail(targetUser.displayAvatarURL({ size: 256 }))
+      .setColor(0x5865f2)
+      .addFields(
+        { name: "User", value: `${targetUser} (${targetUser.id})`, inline: false },
+        { name: "Account Created", value: fmtTs(targetUser.createdAt), inline: true },
+        {
+          name: "Joined Server",
+          value: targetMember?.joinedAt ? fmtTs(targetMember.joinedAt) : "Not in server / Unknown",
+          inline: true,
+        },
+        {
+          name: "Timeout",
+          value:
+            targetMember?.communicationDisabledUntil &&
+            new Date(targetMember.communicationDisabledUntil).getTime() > Date.now()
+              ? `✅ Until ${fmtTs(targetMember.communicationDisabledUntil)}`
+              : "None",
+          inline: false,
+        },
+        { name: "Warnings (Latest 10)", value: warningsText, inline: false },
+      )
+      .setFooter({ text: "RDUSA Moderation" })
+      .setTimestamp();
+
+    return interaction.editReply({ embeds: [embed] });
+  },
+};

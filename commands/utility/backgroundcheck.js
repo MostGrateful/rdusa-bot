@@ -6,9 +6,9 @@ dotenv.config();
 const {
   TRELLO_API_KEY,
   TRELLO_TOKEN,
-  TRELLO_BOARD_SHORTLINK, // e.g. DK6WJt1g
-  TRELLO_BOARD_ID,        // real board id: 60b747b8f127c90bdec5ca84
-  TRELLO_LIST_BLACKLIST,  // name of blacklist list (optional)
+  TRELLO_BOARD_SHORTLINK,
+  TRELLO_BOARD_ID,
+  TRELLO_LIST_BLACKLIST,
 } = process.env;
 
 // Where to send command logs
@@ -40,38 +40,78 @@ async function sendModLog(interaction, embed) {
   }
 }
 
+async function canUseBackgroundCheck(client, guildId, member) {
+  const db = client.db;
+  if (!db || !guildId || !member) return false;
+
+  try {
+    const [rows] = await db.query(
+      `
+      SELECT role_id
+      FROM guild_backgroundcheck_perms
+      WHERE guild_id = ?
+        AND enabled = 1
+      `,
+      [guildId],
+    );
+
+    const allowedRoleIds = (rows || [])
+      .map((r) => String(r.role_id))
+      .filter(Boolean);
+
+    if (!allowedRoleIds.length) return false;
+
+    return member.roles.cache.some((role) => allowedRoleIds.includes(role.id));
+  } catch (err) {
+    console.error("❌ canUseBackgroundCheck SQL error:", err);
+    return false;
+  }
+}
+
 export default {
   data: new SlashCommandBuilder()
     .setName("backgroundcheck")
     .setDescription("Run a background check on a Roblox user and sync with Trello.")
-    .addStringOption(option =>
+    .addStringOption((option) =>
       option
         .setName("username")
         .setDescription("Roblox username to check")
-        .setRequired(true)
+        .setRequired(true),
     ),
 
-  async execute(interaction) {
+  async execute(interaction, client) {
     try {
-      // 🔐 Role check
-      const roleId = "1387212542245339209";
-      if (!interaction.member.roles.cache.has(roleId)) {
-        // Keep unauthorized private (recommended)
+      if (!interaction.inGuild() || !interaction.guild) {
+        return interaction.reply({
+          content: "❌ This command can only be used in a server.",
+          flags: 64,
+        });
+      }
+
+      const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+      if (!member) {
+        return interaction.reply({
+          content: "❌ Could not load your server member data.",
+          flags: 64,
+        });
+      }
+
+      const allowed = await canUseBackgroundCheck(client, interaction.guild.id, member);
+      if (!allowed) {
         return interaction.reply({
           content: "❌ Unauthorized. You cannot use this command.",
           flags: 64,
         });
       }
 
-      const username = interaction.options.getString("username").trim();
+      const username = interaction.options.getString("username", true).trim();
 
-      // Ephemeral "working" message for the command user
       await interaction.reply({
         content: `🔎 Searching Roblox profile for **${username}**...`,
         flags: 64,
       });
 
-      // 🔍 Roblox lookup
+      // Roblox lookup
       const lookupRes = await fetch("https://users.roblox.com/v1/usernames/users", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -80,6 +120,7 @@ export default {
 
       const lookupData = await lookupRes.json();
       const user = lookupData.data?.[0];
+
       if (!user) {
         return interaction.editReply({
           content: `❌ No Roblox user found with the name **${username}**.`,
@@ -97,25 +138,23 @@ export default {
       const accountAgeDays = Math.floor((Date.now() - createdAt.getTime()) / 86400000);
       const isNewAccount = accountAgeDays <= 30;
 
-      // 👥 Roblox groups (for blacklist logic)
+      // Roblox groups
       let userGroups = [];
       try {
-        const groupRes = await fetch(
-          `https://groups.roblox.com/v2/users/${userId}/groups/roles`
-        );
+        const groupRes = await fetch(`https://groups.roblox.com/v2/users/${userId}/groups/roles`);
         const groupData = await groupRes.json();
-        userGroups = groupData.data?.map(g => g.group.id) || [];
+        userGroups = groupData.data?.map((g) => g.group.id) || [];
       } catch (e) {
         console.error("Error fetching Roblox groups:", e);
       }
 
-      // 🗂️ Trello lists (using board SHORTLINK)
+      // Trello lists
       const listsRes = await fetch(
-        `https://api.trello.com/1/boards/${TRELLO_BOARD_SHORTLINK}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+        `https://api.trello.com/1/boards/${TRELLO_BOARD_SHORTLINK}/lists?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
       );
       const lists = await listsRes.json();
 
-      // 🧭 Determine alphabetical bucket
+      // Determine alphabetical bucket
       const firstChar = username[0].toUpperCase();
       const ranges = {
         "0-9": /^[0-9]/,
@@ -137,16 +176,16 @@ export default {
         }
       }
 
-      const targetList = lists.find(l => l.name === matchedList);
+      const targetList = lists.find((l) => l.name === matchedList);
       if (!targetList) {
         return interaction.editReply({
           content: `❌ No Trello list found for **${matchedList}**.`,
         });
       }
 
-      // 🧾 Get or create Trello card (shared naming with /flag-user)
+      // Get or create Trello card
       const cardsRes = await fetch(
-        `https://api.trello.com/1/lists/${targetList.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+        `https://api.trello.com/1/lists/${targetList.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
       );
       const cards = await cardsRes.json();
 
@@ -154,8 +193,8 @@ export default {
       const plainName = username.toLowerCase();
 
       let userCard =
-        cards.find(c => c.name && c.name.toLowerCase() === desiredName) ||
-        cards.find(c => c.name && c.name.toLowerCase() === plainName);
+        cards.find((c) => c.name && c.name.toLowerCase() === desiredName) ||
+        cards.find((c) => c.name && c.name.toLowerCase() === plainName);
 
       const description =
         `**Roblox Username:** ${username}\n` +
@@ -164,7 +203,6 @@ export default {
         `**Join Date:** ${joinDate}`;
 
       if (!userCard) {
-        // Create standardized card
         const createCardRes = await fetch(
           `https://api.trello.com/1/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
           {
@@ -175,11 +213,10 @@ export default {
               name: `${username} (${userId})`,
               desc: description,
             }),
-          }
+          },
         );
         userCard = await createCardRes.json();
       } else {
-        // If it was plain username, rename to standardized
         if (userCard.name.toLowerCase() === plainName) {
           await fetch(
             `https://api.trello.com/1/cards/${userCard.id}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
@@ -187,32 +224,30 @@ export default {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ name: `${username} (${userId})`, desc: description }),
-            }
+            },
           );
           userCard.name = `${username} (${userId})`;
         } else {
-          // Just update description
           await fetch(
             `https://api.trello.com/1/cards/${userCard.id}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
             {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ desc: description }),
-            }
+            },
           );
         }
       }
 
-      // Pre-fetch card labels once (used by blacklist & account<30 logic)
+      // Pre-fetch card labels
       const cardLabelsRes0 = await fetch(
-        `https://api.trello.com/1/cards/${userCard.id}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&limit=1000`
+        `https://api.trello.com/1/cards/${userCard.id}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&limit=1000`,
       );
       const cardLabels0 = await cardLabelsRes0.json();
 
-      // Helper to get/create a board label case-insensitively
       async function getOrCreateBoardLabel(labelName, color) {
         const { ok, data: boardLabels } = await safeFetchJson(
-          `https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&limit=1000`
+          `https://api.trello.com/1/boards/${TRELLO_BOARD_ID}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}&limit=1000`,
         );
 
         if (!ok || !Array.isArray(boardLabels)) {
@@ -220,7 +255,7 @@ export default {
         }
 
         const want = normalizeLabelName(labelName);
-        let label = boardLabels.find(l => normalizeLabelName(l.name) === want);
+        let label = boardLabels.find((l) => normalizeLabelName(l.name) === want);
 
         if (!label) {
           const created = await safeFetchJson(
@@ -233,7 +268,7 @@ export default {
                 name: labelName,
                 color,
               }),
-            }
+            },
           );
 
           if (!created.ok || !created.data?.id) {
@@ -245,88 +280,84 @@ export default {
         return label;
       }
 
-      // Helper to attach/remove card label safely (no duplicates)
       async function ensureCardHasLabel(cardId, cardLabels, labelId, shouldHave) {
-        const hasIt = cardLabels.some(l => l.id === labelId);
+        const hasIt = cardLabels.some((l) => l.id === labelId);
 
         if (shouldHave && !hasIt) {
           await fetch(
             `https://api.trello.com/1/cards/${cardId}/idLabels?value=${labelId}&key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-            { method: "POST" }
+            { method: "POST" },
           );
-          cardLabels.push({ id: labelId }); // keep local state in sync
+          cardLabels.push({ id: labelId });
         }
 
         if (!shouldHave && hasIt) {
           await fetch(
             `https://api.trello.com/1/cards/${cardId}/idLabels/${labelId}?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
-            { method: "DELETE" }
+            { method: "DELETE" },
           );
-          // remove from local state
-          const idx = cardLabels.findIndex(l => l.id === labelId);
+          const idx = cardLabels.findIndex((l) => l.id === labelId);
           if (idx !== -1) cardLabels.splice(idx, 1);
         }
       }
 
-      // 🚩 Blacklist logic (optional) + AUTO-ADD/REMOVE "Flagged - Blacklisted Group" (case-insensitive)
+      // Blacklist logic
       let flaggedGroups = [];
 
       if (TRELLO_LIST_BLACKLIST) {
         const blacklistList = lists.find(
-          l => normalizeLabelName(l.name) === normalizeLabelName(TRELLO_LIST_BLACKLIST)
+          (l) => normalizeLabelName(l.name) === normalizeLabelName(TRELLO_LIST_BLACKLIST),
         );
 
         if (blacklistList) {
           const blRes = await fetch(
-            `https://api.trello.com/1/lists/${blacklistList.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+            `https://api.trello.com/1/lists/${blacklistList.id}/cards?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
           );
           const blCards = await blRes.json();
 
           const blIds = (Array.isArray(blCards) ? blCards : [])
-            .map(c => parseInt(String(c?.name || "").trim(), 10))
-            .filter(id => !Number.isNaN(id));
+            .map((c) => parseInt(String(c?.name || "").trim(), 10))
+            .filter((id) => !Number.isNaN(id));
 
-          flaggedGroups = userGroups.filter(id => blIds.includes(id));
+          flaggedGroups = userGroups.filter((id) => blIds.includes(id));
 
-          // ✅ Get/Create label (case-insensitive)
           const blacklistedLabel = await getOrCreateBoardLabel(
             "Flagged - Blacklisted Group",
-            "red"
+            "red",
           );
 
-          // ✅ Ensure it's applied/removed based on current membership
           await ensureCardHasLabel(
             userCard.id,
             cardLabels0,
             blacklistedLabel.id,
-            flaggedGroups.length > 0
+            flaggedGroups.length > 0,
           );
         }
       }
 
-      // ⚠️ Account <30 label (REAL board ID) — also case-insensitive + no duplicates
+      // Account <30 label
       if (isNewAccount) {
         const thirtyLabel = await getOrCreateBoardLabel("Account <30", "yellow");
         await ensureCardHasLabel(userCard.id, cardLabels0, thirtyLabel.id, true);
       }
 
-      // 🔁 FINAL: fetch ALL labels on the card — every label is a flag
+      // Final flags
       const labelsFinalRes = await fetch(
-        `https://api.trello.com/1/cards/${userCard.id}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`
+        `https://api.trello.com/1/cards/${userCard.id}/labels?key=${TRELLO_API_KEY}&token=${TRELLO_TOKEN}`,
       );
       const labelsFinal = await labelsFinalRes.json();
 
       const allFlags = [
         ...new Set(
           (Array.isArray(labelsFinal) ? labelsFinal : [])
-            .map(l => (l.name && l.name.trim() ? l.name : null))
-            .filter(Boolean)
+            .map((l) => (l.name && l.name.trim() ? l.name : null))
+            .filter(Boolean),
         ),
       ];
 
       const hasFlags = allFlags.length > 0;
 
-      // 🗒️ Trello comment with dynamic emoji based on result
+      // Trello comment
       const statusEmoji = hasFlags ? "🚩" : "✅";
       const flagsLine = hasFlags
         ? `Flags: 🚩 ${allFlags.join(", ")}`
@@ -344,11 +375,11 @@ export default {
         `&token=${TRELLO_TOKEN}` +
         `&text=${encodeURIComponent(commentText)}`;
 
-      await fetch(commentUrl, { method: "POST" }).catch(err =>
-        console.error("Failed to post Trello comment:", err)
+      await fetch(commentUrl, { method: "POST" }).catch((err) =>
+        console.error("Failed to post Trello comment:", err),
       );
 
-      // 🧾 Discord embed (PUBLIC)
+      // Discord embed (PUBLIC)
       const resultEmbed = new EmbedBuilder()
         .setTitle(`${username} (${userId})`)
         .setColor(hasFlags ? 0xed4245 : 0x57f287)
@@ -372,15 +403,13 @@ export default {
             name: "Trello Card",
             value: `[Open Card](${userCard.url})`,
             inline: false,
-          }
+          },
         )
         .setFooter({ text: "RDUSA Background Check System" })
         .setTimestamp();
 
-      // ✅ Send PUBLIC message anyone can see
       await interaction.channel.send({ embeds: [resultEmbed] });
 
-      // ✅ Mod Log (like it used to): send to <#1439479062572699739>
       const logEmbed = new EmbedBuilder()
         .setColor(hasFlags ? 0xed4245 : 0x57f287)
         .setTitle("🧾 Background Check Logged")
@@ -399,33 +428,33 @@ export default {
             value: flaggedGroups.length > 0 ? flaggedGroups.join(", ") : "None",
             inline: false,
           },
-          { name: "Trello Card", value: userCard.url || "N/A", inline: false }
+          { name: "Trello Card", value: userCard.url || "N/A", inline: false },
         )
         .setTimestamp();
 
       await sendModLog(interaction, logEmbed);
 
-      // Clear the ephemeral "Searching..." reply
       await interaction.editReply({ content: "✅ Background check posted.", embeds: [] });
     } catch (err) {
       console.error("Error in /backgroundcheck:", err);
 
-      // Attempt to log failures too
       try {
         const failEmbed = new EmbedBuilder()
           .setColor(0xed4245)
           .setTitle("❌ Background Check Failed")
           .addFields(
             { name: "User", value: interaction.user.tag, inline: true },
-            { name: "Channel", value: interaction.channel?.id ? `<#${interaction.channel.id}>` : "Unknown", inline: true },
-            { name: "Error", value: String(err?.message || err).slice(0, 1024), inline: false }
+            {
+              name: "Channel",
+              value: interaction.channel?.id ? `<#${interaction.channel.id}>` : "Unknown",
+              inline: true,
+            },
+            { name: "Error", value: String(err?.message || err).slice(0, 1024), inline: false },
           )
           .setTimestamp();
 
         await sendModLog(interaction, failEmbed);
-      } catch {
-        // ignore
-      }
+      } catch {}
 
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply({

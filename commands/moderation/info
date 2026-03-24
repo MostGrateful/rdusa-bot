@@ -1,0 +1,137 @@
+// commands/moderation/info.js
+import { SlashCommandBuilder, EmbedBuilder } from "discord.js";
+
+const OWNER_ID = "238058962711216130";
+
+const ALLOWED_ROLE_IDS = [
+  "1347735054822015090",
+  "1369065942243344464",
+  "1369877362224664647",
+  "1332197345403605123",
+  "1332198672720723988",
+];
+
+function hasModPerms(member) {
+  if (!member) return false;
+  if (member.id === OWNER_ID) return true;
+  return member.roles?.cache?.some((r) => ALLOWED_ROLE_IDS.includes(r.id)) ?? false;
+}
+
+function fmtTs(date) {
+  if (!date) return "Unknown";
+  const unix = Math.floor(new Date(date).getTime() / 1000);
+  return `<t:${unix}:F>\n(<t:${unix}:R>)`;
+}
+
+async function getWarningCountSafe(db, userId) {
+  if (!db) return null;
+
+  // We don't assume your exact schema.
+  // We'll try a few common patterns and return the first that works.
+  const candidates = [
+    { sql: "SELECT COUNT(*) AS c FROM warnings WHERE user_id = ?", params: [userId] },
+    { sql: "SELECT COUNT(*) AS c FROM warnings WHERE userId = ?", params: [userId] },
+    { sql: "SELECT COUNT(*) AS c FROM mod_warnings WHERE user_id = ?", params: [userId] },
+    { sql: "SELECT COUNT(*) AS c FROM mod_warnings WHERE userId = ?", params: [userId] },
+  ];
+
+  for (const q of candidates) {
+    try {
+      const [rows] = await db.query(q.sql, q.params);
+      const count = rows?.[0]?.c;
+      if (typeof count === "number") return count;
+      const n = Number(count);
+      if (Number.isFinite(n)) return n;
+    } catch {
+      // try next pattern
+    }
+  }
+
+  return null;
+}
+
+export default {
+  data: new SlashCommandBuilder()
+    .setName("info")
+    .setDescription("View information about a member (Bot-owner roles only).")
+    .addUserOption((opt) =>
+      opt.setName("user").setDescription("User to view info for").setRequired(true),
+    ),
+
+  async execute(interaction, client) {
+    const memberInvoker = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+    if (!hasModPerms(memberInvoker)) {
+      return interaction.reply({ content: "🚫 You are not authorized to use this command.", flags: 64 });
+    }
+
+    if (!interaction.inGuild()) {
+      return interaction.reply({ content: "❌ This command can only be used in a server.", flags: 64 });
+    }
+
+    await interaction.deferReply({ flags: 64 });
+
+    const targetUser = interaction.options.getUser("user", true);
+    const targetMember = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+
+    // Basic Discord info
+    const createdAt = targetUser.createdAt;
+    const joinedAt = targetMember?.joinedAt ?? null;
+
+    // Timeout info
+    const timeoutUntil = targetMember?.communicationDisabledUntil
+      ? new Date(targetMember.communicationDisabledUntil)
+      : null;
+
+    const isTimedOut = !!timeoutUntil && timeoutUntil.getTime() > Date.now();
+
+    // Roles (top 15 to avoid massive embeds)
+    const roleList = targetMember
+      ? targetMember.roles.cache
+          .filter((r) => r.id !== interaction.guild.id)
+          .sort((a, b) => b.position - a.position)
+          .map((r) => r.toString())
+      : [];
+
+    const rolesText =
+      roleList.length === 0
+        ? "None"
+        : roleList.slice(0, 15).join(" ") + (roleList.length > 15 ? `\n…and **${roleList.length - 15}** more.` : "");
+
+    // Warning count (safe)
+    const db = client?.db;
+    const warnCount = await getWarningCountSafe(db, targetUser.id);
+
+    const embed = new EmbedBuilder()
+      .setTitle(`User Info — ${targetUser.tag}`)
+      .setThumbnail(targetUser.displayAvatarURL({ size: 256 }))
+      .setColor(0x2b2d31)
+      .addFields(
+        { name: "User", value: `${targetUser} (${targetUser.id})`, inline: false },
+        { name: "Account Created", value: fmtTs(createdAt), inline: true },
+        { name: "Joined Server", value: targetMember ? fmtTs(joinedAt) : "Not in server / Unknown", inline: true },
+        {
+          name: "Timeout",
+          value: !targetMember
+            ? "Unknown"
+            : isTimedOut
+              ? `✅ Timed out until:\n${fmtTs(timeoutUntil)}`
+              : "None",
+          inline: false,
+        },
+        {
+          name: "Warnings",
+          value: warnCount === null ? "N/A" : String(warnCount),
+          inline: true,
+        },
+        {
+          name: "Roles",
+          value: targetMember ? rolesText : "Unknown",
+          inline: false,
+        },
+      )
+      .setFooter({ text: "RDUSA Moderation" })
+      .setTimestamp();
+
+    return interaction.editReply({ embeds: [embed] });
+  },
+};

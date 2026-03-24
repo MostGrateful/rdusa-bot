@@ -1,0 +1,111 @@
+// commands/moderation/purge.js
+import { SlashCommandBuilder, EmbedBuilder, PermissionsBitField } from "discord.js";
+
+const OWNER_ID = "238058962711216130";
+
+const ALLOWED_ROLE_IDS = [
+  "1347735054822015090",
+  "1369065942243344464",
+  "1369877362224664647",
+  "1332197345403605123",
+  "1332198672720723988",
+];
+
+const MOD_LOG_CHANNEL_ID = process.env.MOD_LOG_CHANNEL_ID || null;
+
+function hasModPerms(member) {
+  if (!member) return false;
+  if (member.id === OWNER_ID) return true;
+  return member.roles?.cache?.some((r) => ALLOWED_ROLE_IDS.includes(r.id)) ?? false;
+}
+
+export default {
+  data: new SlashCommandBuilder()
+    .setName("purge")
+    .setDescription("Delete messages in a channel (Bot-owner roles only).")
+    .addIntegerOption((opt) =>
+      opt
+        .setName("amount")
+        .setDescription("How many messages to delete (1-100)")
+        .setMinValue(1)
+        .setMaxValue(100)
+        .setRequired(true),
+    )
+    .addUserOption((opt) =>
+      opt
+        .setName("user")
+        .setDescription("Only delete messages from this user (optional)")
+        .setRequired(false),
+    ),
+
+  async execute(interaction) {
+    const invoker = await interaction.guild?.members.fetch(interaction.user.id).catch(() => null);
+    if (!hasModPerms(invoker)) {
+      return interaction.reply({ content: "🚫 You are not authorized.", flags: 64 });
+    }
+
+    if (!interaction.inGuild()) {
+      return interaction.reply({ content: "❌ This command can only be used in a server.", flags: 64 });
+    }
+
+    await interaction.deferReply({ flags: 64 });
+
+    const amount = interaction.options.getInteger("amount", true);
+    const user = interaction.options.getUser("user", false);
+
+    const me = await interaction.guild.members.fetchMe().catch(() => null);
+    if (!me?.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+      return interaction.editReply("❌ I do not have permission to purge (**Manage Messages**).");
+    }
+
+    const channel = interaction.channel;
+    if (!channel?.isTextBased?.()) {
+      return interaction.editReply("❌ This channel is not a text channel.");
+    }
+
+    try {
+      // Fetch extra so we can filter and still delete up to `amount`
+      const fetched = await channel.messages.fetch({ limit: 100 });
+
+      let toDelete = Array.from(fetched.values());
+
+      // Exclude the interaction command message doesn't exist for slash, so ignore
+      if (user) {
+        toDelete = toDelete.filter((m) => m.author?.id === user.id);
+      }
+
+      toDelete = toDelete.slice(0, amount);
+
+      if (toDelete.length === 0) {
+        return interaction.editReply("ℹ️ No messages found to delete with that filter.");
+      }
+
+      const deleted = await channel.bulkDelete(toDelete, true); // true = filter out older than 14 days automatically
+
+      const deletedCount = deleted?.size ?? 0;
+
+      const embed = new EmbedBuilder()
+        .setColor(0xfee75c)
+        .setTitle("🧹 Messages Purged")
+        .addFields(
+          { name: "Channel", value: `${channel}`, inline: true },
+          { name: "Deleted", value: String(deletedCount), inline: true },
+          { name: "Filtered User", value: user ? `${user.tag} (${user.id})` : "None", inline: false },
+          { name: "Moderator", value: `${interaction.user.tag} (${interaction.user.id})`, inline: false },
+        )
+        .setTimestamp();
+
+      if (MOD_LOG_CHANNEL_ID) {
+        const logChannel = await interaction.client.channels.fetch(MOD_LOG_CHANNEL_ID).catch(() => null);
+        if (logChannel?.isTextBased?.()) await logChannel.send({ embeds: [embed] }).catch(() => null);
+      }
+
+      return interaction.editReply(`✅ Purged **${deletedCount}** message(s) in ${channel}.`);
+    } catch (err) {
+      console.error("Purge error:", err);
+      return interaction.editReply(
+        "❌ Failed to purge messages. (Note: Discord cannot bulk-delete messages older than ~14 days.)",
+      );
+    }
+  },
+};

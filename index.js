@@ -1,4 +1,3 @@
-// index.js
 import {
   Client,
   GatewayIntentBits,
@@ -18,6 +17,7 @@ import mysql from "mysql2/promise";
 import { fileURLToPath } from "url";
 import { checkExpiredBlacklists } from "./utils/trelloExpiryManager.js";
 import { updateChainOfCommand } from "./utils/updateCoC.js";
+import { startBirthdayScheduler } from "./utils/birthdayPoster.js";
 
 dotenv.config();
 
@@ -56,7 +56,7 @@ async function getTrelloBlacklistListId() {
   if (!key || !token) return null;
 
   const { ok, data } = await _trelloFetchJson(
-    `https://api.trello.com/1/boards/${TRELLO_BLACKLIST_BOARD_SHORTLINK}/lists?key=${key}&token=${token}`,
+    `https://api.trello.com/1/boards/${TRELLO_BLACKLIST_BOARD_SHORTLINK}/lists?key=${key}&token=${token}`
   );
   if (!ok || !Array.isArray(data)) return null;
 
@@ -79,7 +79,7 @@ function extractReasonFromDesc(desc) {
   const reason = match[1].trim();
   if (!reason) return null;
 
-  return reason.length > 500 ? reason.slice(0, 497) + "..." : reason;
+  return reason.length > 500 ? `${reason.slice(0, 497)}...` : reason;
 }
 
 async function isUserBlacklistedTrello(userId) {
@@ -105,7 +105,7 @@ async function isUserBlacklistedTrello(userId) {
   }
 
   const { ok, data: cards } = await _trelloFetchJson(
-    `https://api.trello.com/1/lists/${listId}/cards?key=${key}&token=${token}`,
+    `https://api.trello.com/1/lists/${listId}/cards?key=${key}&token=${token}`
   );
 
   if (!ok || !Array.isArray(cards)) {
@@ -229,6 +229,62 @@ try {
   `);
 
   console.log("🧾 discord_requests table ensured.");
+
+  // ✅ Birthday table
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS birthdays (
+      user_id VARCHAR(32) NOT NULL,
+      guild_id VARCHAR(32) NOT NULL,
+      month TINYINT NOT NULL,
+      day TINYINT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, guild_id)
+    );
+  `);
+
+  console.log("🎂 birthdays table ensured.");
+
+  // ✅ Birthday daily post tracker (prevents duplicates)
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS birthday_daily_posts (
+      guild_id VARCHAR(32) NOT NULL,
+      post_date DATE NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (guild_id, post_date)
+    );
+  `);
+
+  console.log("📆 birthday_daily_posts table ensured.");
+
+  // ✅ Guild config table for birthday channel storage
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS guild_config (
+      guild_id VARCHAR(32) NOT NULL PRIMARY KEY,
+      birthday_channel_id VARCHAR(32) NULL
+    );
+  `);
+
+  console.log("🏛️ guild_config table ensured.");
+
+  // ✅ Add birthday_channel_id if table already existed without it
+  try {
+    await db.query(`
+      ALTER TABLE guild_config
+      ADD COLUMN birthday_channel_id VARCHAR(32) NULL
+    `);
+    console.log("➕ Added birthday_channel_id column to guild_config.");
+  } catch (alterErr) {
+    const msg = String(alterErr?.message || "").toLowerCase();
+    if (
+      msg.includes("duplicate column") ||
+      msg.includes("already exists")
+    ) {
+      console.log("ℹ️ birthday_channel_id column already exists.");
+    } else {
+      console.error("❌ Failed altering guild_config for birthday_channel_id:", alterErr);
+    }
+  }
 } catch (err) {
   console.error("❌ Failed to connect to MySQL:", err);
 }
@@ -296,7 +352,7 @@ client.once("clientReady", async () => {
   if (db) {
     try {
       const [rows] = await db.query(
-        "SELECT bot_status_text, bot_status_type, bot_status_state FROM bot_config WHERE id = 1",
+        "SELECT bot_status_text, bot_status_type, bot_status_state FROM bot_config WHERE id = 1"
       );
 
       if (rows.length > 0) {
@@ -306,7 +362,7 @@ client.once("clientReady", async () => {
         if (cfg.bot_status_state) status = cfg.bot_status_state;
 
         console.log(
-          `🎛 Loaded presence from DB: text="${activityName}", type=${activityType}, status="${status}"`,
+          `🎛 Loaded presence from DB: text="${activityName}", type=${activityType}, status="${status}"`
         );
       } else {
         console.warn("⚠️ bot_config row id=1 not found, using default presence.");
@@ -330,7 +386,7 @@ client.once("clientReady", async () => {
       .setDescription(`**${client.user.tag}** is now online and operational.`)
       .addFields(
         { name: "Startup Time", value: `<t:${Math.floor(Date.now() / 1000)}:F>` },
-        { name: "Servers Connected", value: `${client.guilds.cache.size}` },
+        { name: "Servers Connected", value: `${client.guilds.cache.size}` }
       )
       .setFooter({ text: "RDUSA Bot Logging System" })
       .setTimestamp();
@@ -345,6 +401,9 @@ client.once("clientReady", async () => {
   console.log("🕓 Scheduling daily Chain of Command updates...");
   setInterval(() => updateChainOfCommand(client), 1000 * 60 * 60 * 24);
   await updateChainOfCommand(client);
+
+  console.log("🎂 Starting birthday scheduler...");
+  startBirthdayScheduler(client);
 });
 
 // ───────────────────────────────
@@ -407,7 +466,7 @@ client.on("interactionCreate", async (interaction) => {
         { name: "Division", value: division, inline: true },
         { name: "Division Rank", value: divisionRank, inline: true },
         { name: "Reason & Division Benefit", value: reason || "No reason provided.", inline: false },
-        { name: "Requested By", value: `<@${interaction.user.id}>`, inline: false },
+        { name: "Requested By", value: `<@${interaction.user.id}>`, inline: false }
       )
       .setTimestamp();
 
@@ -475,8 +534,6 @@ client.on("interactionCreate", async (interaction) => {
     const messageId = interaction.customId.split(":")[1];
     const denyReason = interaction.fields.getTextInputValue("deny_reason")?.trim() || "No reason provided.";
 
-    // Load allowed revoke roles for THIS guild from SQL
-    // Expected table: guild_commission_revoke_perms(guild_id, role_id, enabled)
     const guildId = interaction.guild?.id;
     if (!guildId) return safeReply(interaction, { content: "❌ This can only be used in a server.", flags: 64 });
 
@@ -487,7 +544,7 @@ client.on("interactionCreate", async (interaction) => {
     try {
       const [permRows] = await db.query(
         "SELECT role_id FROM guild_commission_revoke_perms WHERE guild_id=? AND enabled=1",
-        [guildId],
+        [guildId]
       );
       const allowedRoleIds = (permRows || []).map((r) => String(r.role_id)).filter(Boolean);
       canRevoke = allowedRoleIds.length
@@ -504,7 +561,7 @@ client.on("interactionCreate", async (interaction) => {
 
     const [rows] = await db.query(
       "SELECT * FROM discord_requests WHERE type='commission' AND message_id=? LIMIT 1",
-      [messageId],
+      [messageId]
     );
     if (!rows.length) {
       return safeReply(interaction, { content: "❌ Request not found in database.", flags: 64 });
@@ -518,7 +575,7 @@ client.on("interactionCreate", async (interaction) => {
 
     await db.query(
       "UPDATE discord_requests SET status='denied', decided_by=?, decided_reason=?, decided_at=NOW() WHERE message_id=?",
-      [interaction.user.id, denyReason, messageId],
+      [interaction.user.id, denyReason, messageId]
     );
 
     const ch = await client.channels.fetch(req.channel_id).catch(() => null);
@@ -548,7 +605,6 @@ client.on("interactionCreate", async (interaction) => {
       await msg.edit({ embeds: [revokedEmbed], components: [] }).catch(() => null);
     }
 
-    // DM requester about revoke (best-effort)
     try {
       const requester = await client.users.fetch(req.requester_id).catch(() => null);
       if (requester) {
@@ -583,10 +639,9 @@ client.on("interactionCreate", async (interaction) => {
       return safeReply(interaction, { content: "❌ Invalid button payload.", flags: 64 });
     }
 
-    // Verify request exists
     const [rows] = await db.query(
       "SELECT * FROM discord_requests WHERE type='commission' AND message_id=? LIMIT 1",
-      [messageId],
+      [messageId]
     );
     if (!rows.length) {
       return safeReply(interaction, { content: "❌ Request not found in database.", flags: 64 });
@@ -594,21 +649,18 @@ client.on("interactionCreate", async (interaction) => {
 
     const req = rows[0];
 
-    // If already denied -> remove buttons quietly
     if (req.status === "denied") {
       await interaction.deferUpdate().catch(() => null);
       await interaction.message.edit({ components: [] }).catch(() => null);
       return;
     }
 
-    // Only allow revoke if approved
     if (req.status !== "approved") {
       await interaction.deferUpdate().catch(() => null);
       await interaction.message.edit({ components: [] }).catch(() => null);
       return;
     }
 
-    // Role gate: guild_commission_revoke_perms
     const guildId = interaction.guild?.id;
     if (!guildId) return safeReply(interaction, { content: "❌ This can only be used in a server.", flags: 64 });
 
@@ -619,7 +671,7 @@ client.on("interactionCreate", async (interaction) => {
     try {
       const [permRows] = await db.query(
         "SELECT role_id FROM guild_commission_revoke_perms WHERE guild_id=? AND enabled=1",
-        [guildId],
+        [guildId]
       );
       const allowedRoleIds = (permRows || []).map((r) => String(r.role_id)).filter(Boolean);
       canRevoke = allowedRoleIds.length
@@ -634,7 +686,6 @@ client.on("interactionCreate", async (interaction) => {
       return safeReply(interaction, { content: "🚫 You are not authorized to revoke approvals.", flags: 64 });
     }
 
-    // Open modal for reason
     const modal = new ModalBuilder()
       .setCustomId(`commission_revoke_modal:${messageId}`)
       .setTitle("Revoke Approval");
@@ -652,7 +703,6 @@ client.on("interactionCreate", async (interaction) => {
   // ─── Slash Commands ───
   if (!interaction.isChatInputCommand()) return;
 
-  // 🛠️ Maintenance mode + override logic
   const BOT_OWNER_ID = "238058962711216130";
   const MAINT_OVERRIDE_ROLE_ID = "1442276596558987446";
 
@@ -706,7 +756,6 @@ client.on("interactionCreate", async (interaction) => {
   const command = client.commands.get(interaction.commandName);
   if (!command) return;
 
-  // 🧱 Bot-owner-only commands that the override role must NOT use
   const OWNER_ONLY_COMMANDS = ["blacklist", "eval", "maintenance", "owner", "reload", "setstatus", "shutdown"];
 
   if (maintenanceOn && hasOverrideRole && !isOwner && OWNER_ONLY_COMMANDS.includes(interaction.commandName)) {
@@ -724,10 +773,8 @@ client.on("interactionCreate", async (interaction) => {
   } catch (error) {
     console.error(`❌ Error executing /${interaction.commandName}:`, error);
 
-    // ✅ If the interaction expired (10062), don't crash or try to reply again
     if (error?.code === 10062) return;
 
-    // ✅ Don't let reply/editReply failures crash the bot
     try {
       if (!interaction.replied && !interaction.deferred) {
         await interaction.reply({

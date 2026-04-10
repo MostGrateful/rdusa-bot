@@ -1,4 +1,3 @@
-// commands/admin/commission-request.js
 import {
   SlashCommandBuilder,
   EmbedBuilder,
@@ -12,12 +11,87 @@ function buildJumpLink(guildId, channelId, messageId) {
   return `https://discord.com/channels/${guildId}/${channelId}/${messageId}`;
 }
 
-// ✅ Roblox username -> userId resolver (official endpoint)
+function buildCommissionEmbed({
+  username,
+  robloxUserId,
+  robloxProfile,
+  oldrank,
+  newrank,
+  reason,
+  pingUserId,
+  requesterId,
+  status,
+  decidedBy = "Pending Review",
+  decisionReason = null,
+  requestId = "Pending",
+}) {
+  const embed = new EmbedBuilder()
+    .setColor(
+      status === "approved"
+        ? 0x57f287
+        : status === "denied"
+          ? 0xed4245
+          : status === "cancelled"
+            ? 0x5865f2
+            : 0xfee75c
+    )
+    .setTitle("📗 Commission Request")
+    .addFields(
+      { name: "Username", value: username || "N/A", inline: true },
+      { name: "Roblox ID", value: robloxUserId || "N/A", inline: true },
+      { name: "Old Rank", value: oldrank || "N/A", inline: true },
+      { name: "New Rank", value: newrank || "N/A", inline: true },
+      { name: "Roblox Profile", value: robloxProfile || "N/A", inline: false },
+      { name: "Reason", value: reason || "N/A", inline: false },
+      { name: "Ping", value: `<@${pingUserId}>`, inline: true },
+      { name: "Requested By", value: `<@${requesterId}>`, inline: true },
+      {
+        name: "Status",
+        value:
+          status === "approved"
+            ? "✅ Approved"
+            : status === "denied"
+              ? "❌ Denied"
+              : status === "cancelled"
+                ? "🛑 Cancelled"
+                : "⏳ Pending",
+        inline: false,
+      },
+      { name: "Reviewed By", value: decidedBy || "Pending Review", inline: false }
+    )
+    .setFooter({ text: `Request ID: ${requestId}` })
+    .setTimestamp();
+
+  if (decisionReason) {
+    embed.addFields({ name: "Decision Reason", value: decisionReason, inline: false });
+  }
+
+  return embed;
+}
+
+function buildPendingButtons(messageId) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`commission_approve:${messageId}`)
+        .setLabel("Approve")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`commission_deny:${messageId}`)
+        .setLabel("Deny")
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId(`commission_cancel:${messageId}`)
+        .setLabel("Cancel Request")
+        .setStyle(ButtonStyle.Secondary)
+    ),
+  ];
+}
+
 async function resolveRobloxUserByUsername(username) {
   const clean = String(username || "").trim();
   if (!clean) return { ok: false, error: "No username provided." };
 
-  // Roblox usernames are 3-20 chars
   if (clean.length < 3 || clean.length > 20) {
     return { ok: false, error: "That Roblox username length is invalid (must be 3-20 characters)." };
   }
@@ -35,7 +109,7 @@ async function resolveRobloxUserByUsername(username) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-  } catch (e) {
+  } catch {
     return { ok: false, error: "Roblox lookup failed (network error)." };
   }
 
@@ -57,34 +131,30 @@ async function resolveRobloxUserByUsername(username) {
   return {
     ok: true,
     userId: String(user.id),
-    username: String(user.name), // canonical casing
+    username: String(user.name),
   };
 }
 
 export default {
   data: new SlashCommandBuilder()
     .setName("commission-request")
-    .setDescription("Submit a commission request (auto-approved).")
+    .setDescription("Submit a commission request.")
     .addStringOption((o) =>
-      o.setName("username").setDescription("Roblox username").setRequired(true),
+      o.setName("username").setDescription("Roblox username").setRequired(true)
     )
     .addStringOption((o) =>
-      o.setName("oldrank").setDescription("Old rank").setRequired(true),
+      o.setName("oldrank").setDescription("Old rank").setRequired(true)
     )
     .addStringOption((o) =>
-      o.setName("newrank").setDescription("New rank").setRequired(true),
+      o.setName("newrank").setDescription("New rank").setRequired(true)
     )
     .addStringOption((o) =>
-      o.setName("reason").setDescription("Reason for commission").setRequired(true),
+      o.setName("reason").setDescription("Reason for commission").setRequired(true)
     )
     .addUserOption((o) =>
-      o.setName("ping").setDescription("User to ping").setRequired(true),
+      o.setName("ping").setDescription("User to ping").setRequired(true)
     ),
 
-  /**
-   * @param {import("discord.js").ChatInputCommandInteraction} interaction
-   * @param {import("discord.js").Client} client
-   */
   async execute(interaction, client) {
     await interaction.deferReply({ flags: 64 });
 
@@ -97,7 +167,6 @@ export default {
 
     const guildId = interaction.guild.id;
 
-    // ✅ Load commission log channel from SQL (supports both column names)
     let commissionLogChannelId = null;
     try {
       const [rows] = await db.query(
@@ -105,7 +174,7 @@ export default {
          FROM guild_commission_config
          WHERE guild_id = ?
          LIMIT 1`,
-        [guildId],
+        [guildId]
       );
 
       if (rows?.length) {
@@ -118,14 +187,17 @@ export default {
 
     if (!commissionLogChannelId) {
       return interaction.editReply(
-        "❌ Commission request log channel is not configured.\nUse /setcommissionrequestlog first.",
+        "❌ Commission request log channel is not configured.\nUse /setcommissionrequestlog first."
       );
     }
 
-    const logChannel = await client.channels.fetch(commissionLogChannelId).catch(() => null);
+    const logChannel =
+      interaction.guild.channels.cache.get(commissionLogChannelId) ||
+      (await interaction.guild.channels.fetch(commissionLogChannelId).catch(() => null));
+
     if (!logChannel || !logChannel.isTextBased()) {
       return interaction.editReply(
-        "❌ The configured commission log channel no longer exists or isn’t a text channel.\nRun /setcommissionrequestlog again.",
+        "❌ The configured commission log channel no longer exists or isn’t a text channel.\nRun /setcommissionrequestlog again."
       );
     }
 
@@ -139,51 +211,35 @@ export default {
       return interaction.editReply("🚫 You cannot submit a commission request for yourself.");
     }
 
-    // ✅ Validate Roblox username exists (and normalize casing)
     const rb = await resolveRobloxUserByUsername(usernameInput);
     if (!rb.ok) {
       return interaction.editReply(`❌ ${rb.error}`);
     }
 
-    const username = rb.username; // canonical casing
+    const username = rb.username;
     const robloxUserId = rb.userId;
     const robloxProfile = `https://www.roblox.com/users/${robloxUserId}/profile`;
 
-    // ✅ Auto-approved embed
-    const approvedByText = "RDUSA | Operations";
-    const embed = new EmbedBuilder()
-      .setColor(0x57f287)
-      .setTitle("📗 Commission Request (Auto-Approved)")
-      .addFields(
-        { name: "Username", value: username || "N/A", inline: true },
-        { name: "Roblox ID", value: robloxUserId || "N/A", inline: true },
-        { name: "Old Rank", value: oldrank || "N/A", inline: true },
-        { name: "New Rank", value: newrank || "N/A", inline: true },
-        { name: "Roblox Profile", value: robloxProfile, inline: false },
-        { name: "Reason", value: reason || "N/A", inline: false },
-        { name: "Ping", value: `<@${ping.id}>`, inline: true },
-        { name: "Requested By", value: `<@${interaction.user.id}>`, inline: true },
-        { name: "Approved By", value: approvedByText, inline: false },
-        { name: "Status", value: "✅ Approved", inline: false },
-      )
-      .setFooter({ text: `Request by ${interaction.user.tag}` })
-      .setTimestamp();
-
-    // Send message FIRST so we have messageId
-    const sentMsg = await logChannel.send({
-      content: `<@${ping.id}>`,
-      embeds: [embed],
-      components: [
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`commission_revoke:${"PENDING"}`)
-            .setLabel("Revoke Approval")
-            .setStyle(ButtonStyle.Danger),
-        ),
-      ],
+    const initialEmbed = buildCommissionEmbed({
+      username,
+      robloxUserId,
+      robloxProfile,
+      oldrank,
+      newrank,
+      reason,
+      pingUserId: ping.id,
+      requesterId: interaction.user.id,
+      status: "pending",
+      decidedBy: "Pending Review",
+      decisionReason: null,
+      requestId: "Pending",
     });
 
-    // Persist request as APPROVED
+    const sentMsg = await logChannel.send({
+      content: `<@${ping.id}>`,
+      embeds: [initialEmbed],
+    });
+
     const payload = {
       username,
       robloxUserId,
@@ -191,18 +247,18 @@ export default {
       oldrank,
       newrank,
       reason,
-      approvedBy: approvedByText,
     };
 
     await db.query(
       `INSERT INTO discord_requests
-        (type, guild_id, channel_id, message_id, requester_id, target_id, payload_json, status, decided_by, decided_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'approved', ?, NOW())
+        (type, guild_id, channel_id, message_id, requester_id, target_id, payload_json, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
        ON DUPLICATE KEY UPDATE
          payload_json = VALUES(payload_json),
-         status = 'approved',
-         decided_by = VALUES(decided_by),
-         decided_at = NOW()`,
+         status = 'pending',
+         decided_by = NULL,
+         decided_at = NULL,
+         decision_reason = NULL`,
       [
         "commission",
         guildId,
@@ -211,52 +267,84 @@ export default {
         interaction.user.id,
         ping.id,
         JSON.stringify(payload),
-        approvedByText, // stored text
-      ],
+      ]
     );
 
-    // Fetch request id for DM footer
-    let requestId = "Unknown";
-    try {
-      const [idRows] = await db.query(
-        `SELECT id FROM discord_requests WHERE type='commission' AND message_id=? LIMIT 1`,
-        [sentMsg.id],
-      );
-      if (idRows?.length) requestId = String(idRows[0].id);
-    } catch (_) {}
-
-    // Patch button customId with real message id (persistent after restarts)
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`commission_revoke:${sentMsg.id}`)
-        .setLabel("Revoke Approval")
-        .setStyle(ButtonStyle.Danger),
+    const [idRows] = await db.query(
+      `SELECT id FROM discord_requests WHERE type='commission' AND message_id=? LIMIT 1`,
+      [sentMsg.id]
     );
 
-    await sentMsg.edit({ components: [row] }).catch(() => null);
+    const requestId = idRows?.length ? String(idRows[0].id) : "Unknown";
 
-    // DM requester with result + link
+    const finalEmbed = buildCommissionEmbed({
+      username,
+      robloxUserId,
+      robloxProfile,
+      oldrank,
+      newrank,
+      reason,
+      pingUserId: ping.id,
+      requesterId: interaction.user.id,
+      status: "pending",
+      decidedBy: "Pending Review",
+      decisionReason: null,
+      requestId,
+    });
+
+    await sentMsg.edit({
+      embeds: [finalEmbed],
+      components: buildPendingButtons(sentMsg.id),
+    });
+
     const jump = buildJumpLink(guildId, logChannel.id, sentMsg.id);
-    const dmEmbed = new EmbedBuilder()
-      .setColor(0x57f287)
-      .setTitle("✅ Commission Request Approved")
-      .setDescription(
-        `Your commission request was **auto-approved**.\n\n**View Request:** ${jump}`,
-      )
-      .addFields(
-        { name: "Username", value: username, inline: true },
-        { name: "Roblox ID", value: robloxUserId, inline: true },
-        { name: "Old Rank", value: oldrank, inline: true },
-        { name: "New Rank", value: newrank, inline: true },
-        { name: "Approved By", value: approvedByText, inline: false },
-      )
-      .setFooter({
-        text: `User ID: ${ping.id} • Request ID: ${requestId} • ${new Date().toLocaleString()}`,
-      })
-      .setTimestamp();
+    const dmRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel("Review Request")
+        .setStyle(ButtonStyle.Link)
+        .setURL(jump)
+    );
 
-    await interaction.user.send({ embeds: [dmEmbed] }).catch(() => null);
+    const pingDmEmbed = buildCommissionEmbed({
+      username,
+      robloxUserId,
+      robloxProfile,
+      oldrank,
+      newrank,
+      reason,
+      pingUserId: ping.id,
+      requesterId: interaction.user.id,
+      status: "pending",
+      decidedBy: "Pending Review",
+      decisionReason: null,
+      requestId,
+    });
 
-    return interaction.editReply("✅ Commission request submitted and auto-approved.");
+    const requesterDmEmbed = buildCommissionEmbed({
+      username,
+      robloxUserId,
+      robloxProfile,
+      oldrank,
+      newrank,
+      reason,
+      pingUserId: ping.id,
+      requesterId: interaction.user.id,
+      status: "pending",
+      decidedBy: "Pending Review",
+      decisionReason: null,
+      requestId,
+    });
+
+    await ping.send({
+      embeds: [pingDmEmbed],
+      components: [dmRow],
+    }).catch(() => null);
+
+    await interaction.user.send({
+      embeds: [requesterDmEmbed],
+      components: [dmRow],
+    }).catch(() => null);
+
+    return interaction.editReply("✅ Commission request submitted and is now pending review.");
   },
 };

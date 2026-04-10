@@ -18,19 +18,19 @@ import { fileURLToPath } from "url";
 import { checkExpiredBlacklists } from "./utils/trelloExpiryManager.js";
 import { updateChainOfCommand } from "./utils/updateCoC.js";
 import { startBirthdayScheduler } from "./utils/birthdayPoster.js";
+import {
+  handleCommissionButtons,
+  handleCommissionModals,
+} from "./utils/commissionRequestHandlers.js";
 
 dotenv.config();
 
 // ───────────────────────────────
-// 🚫 Trello Global Blacklist Helpers (Board/List based)
-// Board shortlink: iD9Bu3c1
-// List name: Blacklisted Users
+// 🚫 Trello Global Blacklist Helpers
 // ───────────────────────────────
 const TRELLO_BLACKLIST_BOARD_SHORTLINK = "iD9Bu3c1";
 const TRELLO_BLACKLIST_LIST_NAME = "Blacklisted Users";
 
-// Cache to avoid hitting Trello every command
-// userId -> { blacklisted: boolean, reason: string|null, expires: number }
 const trelloBlacklistCache = new Map();
 const TRELLO_BLACKLIST_CACHE_MS = 60_000;
 
@@ -90,7 +90,6 @@ async function isUserBlacklistedTrello(userId) {
   const key = process.env.TRELLO_API_KEY;
   const token = process.env.TRELLO_TOKEN;
 
-  // If Trello creds missing, fail open (don’t block)
   if (!key || !token) {
     const result = { blacklisted: false, reason: null, expires: now + TRELLO_BLACKLIST_CACHE_MS };
     trelloBlacklistCache.set(userId, result);
@@ -127,7 +126,7 @@ async function isUserBlacklistedTrello(userId) {
 }
 
 // ───────────────────────────────
-// ✅ Interaction-safe helpers (prevents crashes / double replies)
+// ✅ Interaction-safe helpers
 // ───────────────────────────────
 async function safeReply(interaction, payload) {
   try {
@@ -136,7 +135,7 @@ async function safeReply(interaction, payload) {
     }
     return await interaction.reply(payload);
   } catch (e) {
-    if (e?.code === 10062) return null; // Unknown Interaction
+    if (e?.code === 10062) return null;
     console.warn("⚠️ safeReply failed:", e?.code || e);
     return null;
   }
@@ -167,17 +166,18 @@ async function safeDefer(interaction, opts) {
 }
 
 // ───────────────────────────────
-// ⚙️ Error Guards (Prevents Crashes)
+// ⚙️ Error Guards
 // ───────────────────────────────
 process.on("unhandledRejection", (error) => {
   console.warn("⚠️ Unhandled rejection:", error);
 });
+
 process.on("uncaughtException", (error) => {
   console.warn("⚠️ Uncaught exception:", error);
 });
 
 // ───────────────────────────────
-// 🧠 Client Setup (WITH PARTIALS)
+// 🧠 Client Setup
 // ───────────────────────────────
 const client = new Client({
   intents: [
@@ -208,7 +208,6 @@ try {
   client.db = db;
   console.log("🗄️ MySQL Database connected successfully.");
 
-  // ✅ Ensure table exists for persistent Discord requests
   await db.query(`
     CREATE TABLE IF NOT EXISTS discord_requests (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -219,9 +218,9 @@ try {
       requester_id VARCHAR(32) NOT NULL,
       target_id VARCHAR(32) NOT NULL,
       payload_json JSON NOT NULL,
-      status ENUM('pending','approved','denied') DEFAULT 'pending',
+      status ENUM('pending','approved','denied','cancelled') DEFAULT 'pending',
       decided_by VARCHAR(64) DEFAULT NULL,
-      decided_reason TEXT DEFAULT NULL,
+      decision_reason TEXT DEFAULT NULL,
       decided_at DATETIME DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY uniq_message (message_id)
@@ -230,7 +229,6 @@ try {
 
   console.log("🧾 discord_requests table ensured.");
 
-  // ✅ Birthday table
   await db.query(`
     CREATE TABLE IF NOT EXISTS birthdays (
       user_id VARCHAR(32) NOT NULL,
@@ -245,7 +243,6 @@ try {
 
   console.log("🎂 birthdays table ensured.");
 
-  // ✅ Birthday daily post tracker (prevents duplicates)
   await db.query(`
     CREATE TABLE IF NOT EXISTS birthday_daily_posts (
       guild_id VARCHAR(32) NOT NULL,
@@ -257,7 +254,6 @@ try {
 
   console.log("📆 birthday_daily_posts table ensured.");
 
-  // ✅ Guild config table for birthday channel storage
   await db.query(`
     CREATE TABLE IF NOT EXISTS guild_config (
       guild_id VARCHAR(32) NOT NULL PRIMARY KEY,
@@ -267,7 +263,6 @@ try {
 
   console.log("🏛️ guild_config table ensured.");
 
-  // ✅ Add birthday_channel_id if table already existed without it
   try {
     await db.query(`
       ALTER TABLE guild_config
@@ -276,10 +271,7 @@ try {
     console.log("➕ Added birthday_channel_id column to guild_config.");
   } catch (alterErr) {
     const msg = String(alterErr?.message || "").toLowerCase();
-    if (
-      msg.includes("duplicate column") ||
-      msg.includes("already exists")
-    ) {
+    if (msg.includes("duplicate column") || msg.includes("already exists")) {
       console.log("ℹ️ birthday_channel_id column already exists.");
     } else {
       console.error("❌ Failed altering guild_config for birthday_channel_id:", alterErr);
@@ -297,18 +289,22 @@ const __dirname = path.dirname(__filename);
 
 async function loadCommands(dir) {
   const files = fs.readdirSync(dir, { withFileTypes: true });
+
   for (const file of files) {
     const filePath = path.join(dir, file.name);
+
     if (file.isDirectory()) {
       await loadCommands(filePath);
     } else if (file.name.endsWith(".js")) {
       try {
         const module = await import(`file://${filePath}`);
         const command = module.default;
+
         if (!command?.data || !command?.execute) {
           console.warn(`⚠️ Skipping invalid command file: ${file.name}`);
           continue;
         }
+
         client.commands.set(command.data.name, command);
         console.log(`✅ Loaded command: ${command.data.name}`);
       } catch (e) {
@@ -317,6 +313,7 @@ async function loadCommands(dir) {
     }
   }
 }
+
 await loadCommands(path.join(__dirname, "commands"));
 
 // ───────────────────────────────
@@ -331,21 +328,24 @@ async function loadEvents() {
     const { default: event } = await import(`file://${path.join(eventsPath, file)}`);
     if (!event || !event.name) continue;
 
-    event.once
-      ? client.once(event.name, (...args) => event.execute(...args, client))
-      : client.on(event.name, (...args) => event.execute(...args, client));
+    if (event.once) {
+      client.once(event.name, (...args) => event.execute(...args, client));
+    } else {
+      client.on(event.name, (...args) => event.execute(...args, client));
+    }
   }
 }
+
 await loadEvents();
 
 // ───────────────────────────────
-// 🟢 Ready Event (reads status from SQL)
+// 🟢 Ready Event
 // ───────────────────────────────
 client.once("clientReady", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
   let activityName = "RDUSA";
-  let activityType = 3; // Watching
+  let activityType = 3;
   let status = "online";
 
   const db = client.db;
@@ -439,10 +439,20 @@ client.on("interactionCreate", async (interaction) => {
     return handleBugModal(interaction);
   }
 
-  // ✅ BroadcastDo Modal (VERY IMPORTANT)
+  // ✅ BroadcastDo Modal
   if (interaction.isModalSubmit() && interaction.customId === "broadcastdo_modal") {
     const { handleBroadcastDoModal } = await import("./commands/admin/broadcastdo.js");
     return handleBroadcastDoModal(interaction, client);
+  }
+
+  // ✅ Commission request buttons
+  if (await handleCommissionButtons(interaction, client)) {
+    return;
+  }
+
+  // ✅ Commission request modals
+  if (await handleCommissionModals(interaction, client)) {
+    return;
   }
 
   // ✅ Request Background Check Role Modal
@@ -514,20 +524,20 @@ client.on("interactionCreate", async (interaction) => {
     return;
   }
 
-  // ✅ Edit-Embed Modal (new + legacy)
+  // ✅ Edit-Embed Modal
   if (interaction.isModalSubmit() && interaction.customId.startsWith("editembed_modal:")) {
     const { handleEditEmbedModal } = await import("./commands/Management/editembed.js");
     return handleEditEmbedModal(interaction, client);
   }
+
   if (interaction.isModalSubmit() && interaction.customId.startsWith("editembed:")) {
     const { handleEditEmbedModal } = await import("./commands/Management/editembed.js");
     return handleEditEmbedModal(interaction, client);
   }
 
-  // ─────────────────────────────────────────────
-  // ✅ COMMISSION REVOKE MODAL
-  // customId format: commission_revoke_modal:<messageId>
-  // ─────────────────────────────────────────────
+  // Existing commission revoke modal/button logic left intact below.
+  // You can remove this old revoke-only logic later if the new commission handlers fully replace it.
+
   if (interaction.isModalSubmit() && interaction.customId.startsWith("commission_revoke_modal:")) {
     if (!db) return safeReply(interaction, { content: "❌ Database not available.", flags: 64 });
 
@@ -626,10 +636,6 @@ client.on("interactionCreate", async (interaction) => {
     return safeReply(interaction, { content: "❌ Approval revoked and logged.", flags: 64 });
   }
 
-  // ─────────────────────────────────────────────
-  // ✅ COMMISSION BUTTONS (ONLY REVOKE IS EXPECTED NOW)
-  // customId format: commission_revoke:<messageId>
-  // ─────────────────────────────────────────────
   if (interaction.isButton() && interaction.customId.startsWith("commission_revoke:")) {
     if (!db) return safeReply(interaction, { content: "❌ Database not available.", flags: 64 });
 
@@ -734,7 +740,6 @@ client.on("interactionCreate", async (interaction) => {
     });
   }
 
-  // 🚫 Global Blacklist Check (Trello-based)
   try {
     if (!isOwner) {
       if (interaction.commandName !== "blacklist") {

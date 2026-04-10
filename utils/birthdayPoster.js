@@ -28,6 +28,11 @@ function formatMonthDay(month, day) {
   });
 }
 
+function buildDateKey(month, day) {
+  const today = getTodayEasternParts();
+  return `${today.year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
 async function getBirthdayChannels(client, guild) {
   try {
     const db = client.db;
@@ -46,7 +51,8 @@ async function getBirthdayChannels(client, guild) {
 
     for (const row of multiRows || []) {
       if (!row?.channel_id) continue;
-      const channel = await guild.channels.fetch(row.channel_id).catch(() => null);
+
+      const channel = await guild.channels.fetch(String(row.channel_id)).catch(() => null);
       if (channel) channels.push(channel);
     }
 
@@ -63,7 +69,7 @@ async function getBirthdayChannels(client, guild) {
 
     const legacyChannelId = configRows?.[0]?.birthday_channel_id;
     if (legacyChannelId) {
-      const legacyChannel = await guild.channels.fetch(legacyChannelId).catch(() => null);
+      const legacyChannel = await guild.channels.fetch(String(legacyChannelId)).catch(() => null);
       if (legacyChannel) channels.push(legacyChannel);
     }
 
@@ -83,7 +89,11 @@ export async function postDailyBirthdays(client, options = {}) {
   const db = client.db;
   if (!db) return [];
 
-  const { month, day, dateKey } = getTodayEasternParts();
+  const today = getTodayEasternParts();
+  const month = Number.isInteger(options.month) ? options.month : today.month;
+  const day = Number.isInteger(options.day) ? options.day : today.day;
+  const dateKey = buildDateKey(month, day);
+
   const guildIdFilter = options.guildId || null;
   const force = options.force === true;
 
@@ -93,7 +103,7 @@ export async function postDailyBirthdays(client, options = {}) {
     if (guildIdFilter && guild.id !== guildIdFilter) continue;
 
     try {
-      if (!force) {
+      if (!force && month === today.month && day === today.day) {
         const [alreadyRows] = await db.query(
           `
           SELECT 1
@@ -141,20 +151,21 @@ export async function postDailyBirthdays(client, options = {}) {
       }
 
       const mentions = birthdayRows.map((row) => `<@${row.user_id}>`);
+      const prettyDate = formatMonthDay(month, day);
 
       const embed = new EmbedBuilder()
         .setColor(0xf1c40f)
-        .setTitle("🎉 Today's Birthdays")
+        .setTitle("🎉 Birthday Announcement")
         .setFooter({ text: "RDUSA Birthday System" })
         .setTimestamp();
 
       if (birthdayRows.length) {
         embed.setDescription(
-          `${mentions.join("\n")}\n\nHappy birthday to everyone celebrating **${formatMonthDay(month, day)}**!`
+          `**Date:** ${prettyDate}\n\n${mentions.join("\n")}\n\nHappy birthday to everyone celebrating **${prettyDate}**!`
         );
       } else {
         embed.setDescription(
-          `There are no birthdays listed for **${formatMonthDay(month, day)}**.`
+          `**Date:** ${prettyDate}\n\nThere are no birthdays listed for **${prettyDate}**.`
         );
       }
 
@@ -181,7 +192,7 @@ export async function postDailyBirthdays(client, options = {}) {
         continue;
       }
 
-      if (!force) {
+      if (!force && month === today.month && day === today.day) {
         await db.query(
           `
           INSERT INTO birthday_daily_posts (guild_id, post_date)
